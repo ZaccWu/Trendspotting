@@ -32,7 +32,13 @@ zj = np.random.rand(num_product,2) # (J,2)
 zc = np.random.rand(num_category,2) # (C,2)
 gamma_c = np.random.rand(num_category)
 gamma_j = np.random.rand(num_product)
+product_feature = []
+for j in range(num_product):
+    j_feature = np.concatenate([zj[j,:],zc[int(j/50),:]])
+    product_feature.append(j_feature)
+product_feature = np.array(product_feature) # (J,4)
 
+# purchase data
 St, Vt = [], [] # (J,T)
 t_idx = np.arange(T)
 St1 = np.sin(t_idx*2*math.pi/52)
@@ -52,8 +58,7 @@ St, Vt = np.array(St), np.array(Vt)
 savedt_path = 'data/synthetic/'
 if not os.path.isdir(savedt_path):
     os.makedirs(savedt_path)
-np.save(savedt_path+'zj.npy', zj)
-np.save(savedt_path+'zc.npy', zc)
+np.save(savedt_path+'product_x.npy', product_feature)
 
 for t in range(T):
     epsilon_ic = np.random.normal(0,0.2,(num_user, num_category))
@@ -73,3 +78,14 @@ for t in range(T):
     adj = scipy.sparse.csr_matrix(purchase)
     print("Total purchase perc.:", np.mean(purchase), "shape:", purchase.shape)
     np.savez(savedt_path + 'edge_t' + str(t) + '.npz', adj_data=adj.data,adj_indices=adj.indices,adj_indptr=adj.indptr,adj_shape=adj.shape)
+
+# time series analysis table
+data = {}
+for t in range(T):
+    loader=dict(np.load("data/synthetic/edge_t"+str(t)+".npz"))
+    adj=scipy.sparse.csr_matrix((loader['adj_data'],loader['adj_indices'],loader['adj_indptr']),shape=loader['adj_shape'])
+    adj = adj.todense()
+    day_sales = np.sum(adj, axis=1).T.tolist()[0]
+    data['t'+str(t)] = day_sales
+data = pd.DataFrame(data)
+data.to_csv('sales.csv')
