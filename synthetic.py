@@ -59,7 +59,15 @@ savedt_path = 'data/synthetic/'
 if not os.path.isdir(savedt_path):
     os.makedirs(savedt_path)
 np.save(savedt_path+'product_x.npy', product_feature)
+edge_weight_index = []
+for i in range(num_product):
+    for j in range(i + 1, num_product):
+        edge_weight_index.append([i, j])
+        edge_weight_index.append([j, i])
+edge_weight_index = np.array(edge_weight_index)
+np.save(savedt_path+'edge_weight_idx.npy', edge_weight_index)
 
+data = {}
 for t in range(T):
     epsilon_ic = np.random.normal(0,0.2,(num_user, num_category))
     epsilon_ij = np.random.normal(0,0.2,(num_user, num_product))
@@ -76,16 +84,23 @@ for t in range(T):
 
     purchase = np.random.binomial(1, np.array(purchase_prob))
     adj = scipy.sparse.csr_matrix(purchase)
-    print("Total purchase perc.:", np.mean(purchase), "shape:", purchase.shape)
-    np.savez(savedt_path + 'edge_t' + str(t) + '.npz', adj_data=adj.data,adj_indices=adj.indices,adj_indptr=adj.indptr,adj_shape=adj.shape)
-
-# time series analysis table
-data = {}
-for t in range(T):
-    loader=dict(np.load("data/synthetic/edge_t"+str(t)+".npz"))
-    adj=scipy.sparse.csr_matrix((loader['adj_data'],loader['adj_indices'],loader['adj_indptr']),shape=loader['adj_shape'])
+    print("Day: ", t, "Purchase perc.:", np.mean(purchase), "shape:", purchase.shape)
+    # calculate edge weights
+    neg_dict = {}
+    for i in range(num_product):
+        neg_dict[i] = set(adj[i].nonzero()[1])
+    edge_val = []
+    for i in range(num_product):
+        for j in range(i+1,num_product):
+            num_com_neg = len(neg_dict[i]&neg_dict[j])
+            edge_val.append(num_com_neg)
+            edge_val.append(num_com_neg)
+    edge_val = np.array(edge_val)
+    np.save(savedt_path + 'weight_t'+str(t)+'.npy', edge_val)
+    # calculate sales
     adj = adj.todense()
     day_sales = np.sum(adj, axis=1).T.tolist()[0]
     data['t'+str(t)] = day_sales
+
 data = pd.DataFrame(data)
 data.to_csv('sales.csv')
