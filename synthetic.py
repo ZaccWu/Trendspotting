@@ -17,9 +17,9 @@ random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)
 
-num_user = 10000
-num_category = 50
-num_product = 1000
+num_user = 3000
+num_category = 20
+num_product = 200
 T = 110
 
 def trend(t, mu=3, sigma=0.5):

@@ -6,7 +6,7 @@ import torch
 import random
 import time
 import argparse
-
+import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.data import DataLoader
 from model import TRENDSPOT
@@ -39,18 +39,30 @@ if torch.cuda.is_available():
 device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() else 'cpu')
 
 
-# dv
-sales = pd.read_csv('sales.csv')
+
+def MSE(y_true, y_pred):
+    return np.mean((np.square(y_true - y_pred)))
+
+def MAE(y_true, y_pred):
+    return np.mean(np.abs(y_true - y_pred))
+
+def data_transform(Matrix):
+    Min, Max = np.min(Matrix), np.max(Matrix)
+    result = (Matrix-Min)/(Max-Min)
+    return result
 
 def load_graph_data(day):
     # y_fea: （J, time_step, 1) ; y_pred: list (J)
-    y_pred, y_fea = sales['t'+str(day)], torch.tensor(np.array(sales.loc[:,'t'+str(day-args.K):'t'+str(day-1)]))
+    y_pred, y_fea = sales['t'+str(day)], np.array(sales.loc[:,'t'+str(day-args.K):'t'+str(day-1)])
     # features: (J, zdim)
     features = np.load("data/synthetic/product_x.npy")
     edge_val = np.load("data/synthetic/weight_t"+str(day)+".npy")
-    edges = Data(x=[torch.tensor(features),y_fea], edge_index=torch.LongTensor(edge_index).t().contiguous(), y=torch.tensor(y_pred), edge_attr=torch.tensor(edge_val))
+    edge_val = data_transform(edge_val)
+    edges = Data(x=[torch.FloatTensor(features),torch.FloatTensor(y_fea)], edge_index=torch.LongTensor(edge_index).t().contiguous(), y=torch.FloatTensor(y_pred), edge_attr=torch.FloatTensor(edge_val))
     return edges
 
+# dv
+sales = pd.read_csv('sales.csv')
 edge_index = np.load("data/synthetic/edge_weight_idx.npy")
 train_graph_list = []
 for day in range(30,90):
@@ -59,9 +71,9 @@ for day in range(30,90):
 test_graph_list = []
 for day in range(90,110):
     graph_data = load_graph_data(day)
-    train_graph_list.append([graph_data])
+    test_graph_list.append([graph_data])
 
-model = TRENDSPOT().to(device)
+model = TRENDSPOT(lag=args.K).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 train_loader = DataLoader(train_graph_list, batch_size=args.bs, shuffle=True)
 test_loader = DataLoader(test_graph_list, batch_size=args.bs)
@@ -75,7 +87,7 @@ for epoch in range(args.n_epoch):
         data_fea = data[0].to(device)
         optimizer.zero_grad()
         out = model(data_fea)
-        loss = None # TODO: define the loss
+        loss = F.mse_loss(out, data_fea.y)
         loss.backward()
         total_loss += loss.item()
         optimizer.step()
@@ -85,41 +97,20 @@ for epoch in range(args.n_epoch):
 
     model.eval()
     model.training = False
-    train_label_list = []
-    train_pred_list = []
-    for tdata in train_loader:
-        tdata_fea = tdata[0]
-        train_label_list.extend(tdata_fea.y.detach().cpu().numpy())
-        tdata_fea = tdata_fea.to(device)
-        tr_pred, z = model(tdata_fea)
-        tr_pred = reclassificaiton(tr_pred)
-        _, tr_pred = tr_pred.max(dim=1)
-        train_pred_list.extend(tr_pred.detach().cpu().numpy())
-    train_acc, train_mac_f1 = ld.metrics(train_pred_list, train_label_list)
-
     label_list = []
     pred_list = []
     for tdata in test_loader:
         tdata_fea = tdata[0]
         label_list.extend(tdata_fea.y.detach().cpu().numpy())
         tdata_fea = tdata_fea.to(device)
-        pred, z = model(tdata_fea)
-        pred = reclassificaiton(pred)
-        _, pred = pred.max(dim=1)
+        pred = model(tdata_fea)
+        loss = F.mse_loss(pred, tdata_fea.y)
         pred_list.extend(pred.detach().cpu().numpy())
-    acc, mac_f1 = ld.metrics(pred_list, label_list)
+    mse = MSE(np.array(label_list), np.array(pred_list))
+    mae = MAE(np.array(label_list), np.array(pred_list))
 
-    Epoch.append(epoch + 1)
-    Tr_acc.append(train_acc)
-    Tr_mf1.append(train_mac_f1)
-    Ts_acc.append(acc)
-    Ts_mf1.append(mac_f1)
     print("time of val epoch:", time.time() - t1)
     print('Epoch {:3d},'.format(epoch + 1),
-          'Train Accuracy {:.4f}'.format(train_acc),
-          'Train Macro_f1 {:.4f}'.format(train_mac_f1),
-          'Accuracy {:.4f},'.format(acc),
-          'Macro_f1 {:.4f},'.format(mac_f1),
+          'MSE {:3f},'.format(mse),
+          'MAE {:3f},'.format(mae),
           'time {:4f}'.format(time.time() - t0))
-    print(classification_report(np.array(label_list), np.array(pred_list)))
-    print('task:', args.mpath, 'regp:', args.regp, 'regn:', args.regn, ' tau:', args.tau)
