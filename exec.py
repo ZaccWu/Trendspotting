@@ -19,7 +19,7 @@ parser.add_argument('--K', type=int, help='look-back window size', default=30)
 # training parameter
 parser.add_argument('--seed', type=int, help='random seed', default=101)
 parser.add_argument('--gpu', type=int, help='idx for the gpu to use', default=0)
-parser.add_argument('--lr', type=float, help='learning rate', default=1e-4)
+parser.add_argument('--lr', type=float, help='learning rate', default=1e-3)
 parser.add_argument('--bs', type=int, help='batch size', default=16)
 parser.add_argument('--n_epoch', type=int, help='number of epochs', default=100)
 
