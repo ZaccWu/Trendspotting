@@ -61,6 +61,11 @@ def load_graph_data(day):
     edges = Data(x=[torch.FloatTensor(features),torch.FloatTensor(y_fea)], edge_index=torch.LongTensor(edge_index).t().contiguous(), y=torch.FloatTensor(y_pred), edge_attr=torch.FloatTensor(edge_val))
     return edges
 
+def decorrelate(embI, embV):
+    embI, embV = F.normalize(embI, dim=1), F.normalize(embV, dim=1)
+    orthogonal = torch.sum(torch.mul(embI, embV), dim=1)
+    return torch.sum(orthogonal)
+
 # dv
 sales = pd.read_csv('sales.csv')
 edge_index = np.load("data/synthetic/edge_weight_idx.npy")
@@ -77,6 +82,7 @@ model = TRENDSPOT(lag=args.K).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 train_loader = DataLoader(train_graph_list, batch_size=args.bs, shuffle=True)
 test_loader = DataLoader(test_graph_list, batch_size=args.bs)
+result = {'epoch':[],'MSE':[],'MAE':[]}
 
 for epoch in range(args.n_epoch):
     t0 = time.time()
@@ -86,8 +92,12 @@ for epoch in range(args.n_epoch):
     for data in train_loader:
         data_fea = data[0].to(device)
         optimizer.zero_grad()
-        out = model(data_fea)
-        loss = F.mse_loss(out, data_fea.y)
+        out, out_star, embI, embV = model(data_fea)
+
+        main_loss = F.mse_loss(out, data_fea.y)
+        aug_loss = F.mse_loss(out_star, data_fea.y)
+        dec_loss = decorrelate(embI, embV)
+        loss = main_loss + aug_loss + dec_loss
         loss.backward()
         total_loss += loss.item()
         optimizer.step()
@@ -103,14 +113,20 @@ for epoch in range(args.n_epoch):
         tdata_fea = tdata[0]
         label_list.extend(tdata_fea.y.detach().cpu().numpy())
         tdata_fea = tdata_fea.to(device)
-        pred = model(tdata_fea)
+        pred, _, _, _ = model(tdata_fea)
         loss = F.mse_loss(pred, tdata_fea.y)
         pred_list.extend(pred.detach().cpu().numpy())
     mse = MSE(np.array(label_list), np.array(pred_list))
     mae = MAE(np.array(label_list), np.array(pred_list))
+    result['epoch'].append(epoch)
+    result['MSE'].append(mse)
+    result['MAE'].append(mae)
 
     print("time of val epoch:", time.time() - t1)
     print('Epoch {:3d},'.format(epoch + 1),
           'MSE {:3f},'.format(mse),
           'MAE {:3f},'.format(mae),
           'time {:4f}'.format(time.time() - t0))
+
+result = pd.DataFrame(result)
+result.to_csv('result.csv', index=False)
