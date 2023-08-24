@@ -7,8 +7,8 @@ import torch
 import os
 
 
-beta_m = 1
-beta_v = 0.3
+beta_m = 0.8
+beta_v = 1
 beta_s = 0.2
 delta = 0.05
 
@@ -104,3 +104,4 @@ for t in range(T):
 
 data = pd.DataFrame(data)
 data.to_csv('sales.csv')
+

@@ -46,37 +46,54 @@ class TRENDSPOT(torch.nn.Module):
         super(TRENDSPOT, self).__init__()
         self.dropout = 0.5
         self.training = True
-        self.att_lstm = ATT_LSTM(lag, in_dim, hid_dim, out_channels)
+        self.att_lstm_I = ATT_LSTM(lag, in_dim, hid_dim, out_channels)
+        self.att_lstm_V = ATT_LSTM(lag, in_dim, hid_dim, out_channels)
         self.gatconv_I1 = GCNConv(in_channels+fea_dim, hid_dim, add_self_loops=True)
         self.gatconv_I2 = GCNConv(hid_dim, out_channels, add_self_loops=True)
         self.gatconv_V1 = GCNConv(in_channels+fea_dim, hid_dim, add_self_loops=True)
         self.gatconv_V2 = GCNConv(hid_dim, out_channels, add_self_loops=True)
 
-        self.linear = nn.Linear(out_channels*2, out_dim)
+        # self.linear_sales = nn.Sequential(
+        #     nn.Linear(out_channels*2, out_channels),
+        #     nn.ReLU(),
+        #     nn.Linear(out_channels, 1)
+        # )
+        # self.linear_inc = nn.Sequential(
+        #     nn.Linear(out_channels*2, out_channels),
+        #     nn.ReLU(),
+        #     nn.Linear(out_channels, 1)
+        # )
+
+        self.linear_sales = nn.Linear(out_channels*2, 1)
+        self.linear_inc_V = nn.Linear(out_channels, 2)
         self.act = nn.ReLU()
 
     def forward(self, data):
         # node_x: (batch*J, fea_dim), node_yx: (batch*J, K), edge_index: (2, batch*E), edge_weight: (E)
         node_x, node_yx, edge_index, edge_weight = data.x[0], data.x[1], data.edge_index, data.edge_attr
-        x1 = self.att_lstm(node_yx.unsqueeze(-1))  # (batch*J, K) -> (batch*J, 1, hidden)
-        x1 = torch.squeeze(x1)  # x1: (batch*J, hidden)
-        xcom1 = torch.cat([x1, node_x], dim=1)  # xcom1: (batch*J, hidden+fea_dim)
+        x1I = self.att_lstm_I(node_yx.unsqueeze(-1))  # (batch*J, K) -> (batch*J, 1, hidden)
+        x1V = self.att_lstm_V(node_yx.unsqueeze(-1))  # (batch*J, K) -> (batch*J, 1, hidden)
+        x1I, x1V = torch.squeeze(x1I), torch.squeeze(x1V)  # x1: (batch*J, hidden)
+        xcom1I = torch.cat([x1I, node_x], dim=1)  # xcom1: (batch*J, hidden+fea_dim)
+        xcom1V = torch.cat([x1V, node_x], dim=1)  # xcom1: (batch*J, hidden+fea_dim)
 
-        x2I = F.dropout(xcom1, self.dropout, training=self.training)
+        x2I = F.dropout(xcom1I, self.dropout, training=self.training)
         x2I = self.gatconv_I1(x2I, edge_index, edge_weight)
         x2I = F.dropout(x2I, self.dropout, training=self.training)
         x2I = self.gatconv_I2(x2I, edge_index, edge_weight) # x2I: (batch*J, hidden)
-        x2V = F.dropout(xcom1, self.dropout, training=self.training)
+        x2V = F.dropout(xcom1V, self.dropout, training=self.training)
         x2V = self.gatconv_V1(x2V, edge_index, edge_weight)
         x2V = F.dropout(x2V, self.dropout, training=self.training)
         x2V = self.gatconv_V2(x2V, edge_index, edge_weight) # x2V: (batch*J, out_channels)
         x2V_star = x2V[torch.randperm(x2V.size(0))]
 
-        xcom2 = torch.cat([x2I, x2V], dim=1)    # xcom1: (batch*J, out_channels*2)
-        xcom2_star = torch.cat([x2I, x2V_star], dim=1)  # xcom1: (batch*J, out_channels*2)
+        xcom2 = torch.cat([x2I, x2V], dim=1)    # xcom2: (batch*J, out_channels*2)
+        xcom2_star = torch.cat([x2I, x2V_star], dim=1)  # xcom2_star: (batch*J, out_channels*2)
 
         # (batch*J, out_channels*2) -> (batch*J, 1)
-        pred = self.act(self.linear(xcom2))
-        pred_Vstar = self.act(self.linear(xcom2_star))
+        pred = self.act(self.linear_sales(xcom2))
+        pred_Vstar = self.act(self.linear_sales(xcom2_star))
+        # (batch*J, out_channels) -> (batch*J, 1)
+        pred_inc = self.act(self.linear_inc_V(x2V))
 
-        return pred.squeeze(-1), pred_Vstar.squeeze(-1), x2I, x2V
+        return pred.squeeze(-1), pred_Vstar.squeeze(-1), pred_inc, x2I, x2V

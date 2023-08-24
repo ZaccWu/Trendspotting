@@ -85,7 +85,7 @@ def contrastive_loss(target, pred_score, m=5):
     Rs = torch.mean(pred_score)
     delta = torch.std(pred_score)
     dev_score = (pred_score - Rs)/(delta + 10e-10)
-    cont_score = torch.max(torch.zeros(pred_score.shape), m-dev_score)
+    cont_score = torch.max(torch.zeros(pred_score.shape).to(device), m-dev_score)
     loss = dev_score[(1-target).nonzero()].sum()+cont_score[target.nonzero()].sum()
     return loss
 
@@ -123,7 +123,7 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     train_loader = DataLoader(train_graph_list, batch_size=args.bs, shuffle=True)
     test_loader = DataLoader(test_graph_list, shuffle=False)
-    result = {'epoch':[],'MSE':[],'MAE':[],'C1R1':[],'AF1':[],}
+    result = {'epoch':[],'MSE':[],'MAE':[],'C1R1':[],'C1R2':[],'C1R3':[],}
     ce_loss = nn.CrossEntropyLoss(weight=torch.FloatTensor([1,1000])).to(device)
     criterion = FocalLoss(alpha=1, gamma=2)
     for epoch in range(args.n_epoch):
@@ -140,9 +140,9 @@ def main():
             main_loss = F.mse_loss(out, true_sales)
             aug_loss = F.mse_loss(out_star, true_sales)
             dec_loss = decorrelate(embI, embV)
-            #class_loss = contrastive_loss(true_inc, out_inc)
+            class_loss = contrastive_loss(true_inc, out_inc)
             #class_loss =criterion(out_inc, true_inc)
-            class_loss = ce_loss(out_inc, true_inc)
+            #class_loss = ce_loss(out_inc, true_inc)
 
             loss = main_loss + class_loss * 6000 + aug_loss * args.reg1 + dec_loss * args.reg2
             print(main_loss.item(), class_loss.item(), aug_loss.item(), dec_loss.item())
@@ -158,7 +158,8 @@ def main():
         true_sales_list = []
         pred_sales_list = []
         true_inc_list = []
-        pred_inc_list = []
+        # pred_inc_list = []
+        r1_list, r2_list, r3_list = [], [], []
 
         label_table = []
         pred_table = []
@@ -180,15 +181,18 @@ def main():
             label_table.append(true_sales)
             pred_table.append(pred_sales)
 
-            # r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.9, dim=None, keepdim=False,
-            #                                             interpolation='higher')).detach().cpu().numpy()
-            # r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.95, dim=None, keepdim=False,
-            #                                             interpolation='higher')).detach().cpu().numpy()
-            # r3 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.99, dim=None, keepdim=False,
-            #                                             interpolation='higher')).detach().cpu().numpy()
+            r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.9, dim=None, keepdim=False,
+                                                        interpolation='higher')).detach().cpu().numpy()
+            r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.95, dim=None, keepdim=False,
+                                                        interpolation='higher')).detach().cpu().numpy()
+            r3 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.99, dim=None, keepdim=False,
+                                                        interpolation='higher')).detach().cpu().numpy()
 
-            _, pred_inc = pred_inc.max(dim=1)
-            pred_inc_list.extend(pred_inc.detach().cpu().numpy())
+            # _, pred_inc = pred_inc.max(dim=1)
+            # pred_inc_list.extend(pred_inc.detach().cpu().numpy())
+            r1_list.extend(r1)
+            r2_list.extend(r2)
+            r3_list.extend(r3)
 
 
         # if epoch == args.n_epoch - 1:
@@ -202,24 +206,33 @@ def main():
 
         mse = MSE(np.array(true_sales_list), np.array(pred_sales_list))
         mae = MAE(np.array(true_sales_list), np.array(pred_sales_list))
-        c1_recall = classification_report(np.array(true_inc_list), np.array(pred_inc_list), target_names=['class0', 'class1'],
+        # c1_recall = classification_report(np.array(true_inc_list), np.array(pred_inc_list), target_names=['class0', 'class1'],
+        #                                output_dict=True)['class1']['recall']
+        # f1 = classification_report(np.array(true_inc_list), np.array(pred_inc_list), target_names=['class0', 'class1'],
+        #                                output_dict=True)['macro avg']['f1-score']
+
+        r1_rec = classification_report(np.array(true_inc_list), np.array(r1_list), target_names=['class0', 'class1'],
+                                        output_dict=True)['class1']['recall']
+        r2_rec = classification_report(np.array(true_inc_list), np.array(r2_list), target_names=['class0', 'class1'],
                                        output_dict=True)['class1']['recall']
-        f1 = classification_report(np.array(true_inc_list), np.array(pred_inc_list), target_names=['class0', 'class1'],
-                                       output_dict=True)['macro avg']['f1-score']
+        r3_rec = classification_report(np.array(true_inc_list), np.array(r3_list), target_names=['class0', 'class1'],
+                                       output_dict=True)['class1']['recall']
 
 
         result['epoch'].append(epoch)
         result['MSE'].append(mse)
         result['MAE'].append(mae)
-        result['C1R1'].append(c1_recall)
-        result['AF1'].append(f1)
+        result['C1R1'].append(r1_rec)
+        result['C1R2'].append(r2_rec)
+        result['C1R3'].append(r3_rec)
 
         print("time of val epoch:", time.time() - t1)
         print('Epoch {:3d},'.format(epoch + 1),
               'MSE {:3f},'.format(mse),
               'MAE {:3f},'.format(mae),
-              'C1R1 {:3f},'.format(c1_recall),
-              'AF1 {:3f},'.format(f1),
+              'C1R1 {:3f},'.format(r1_rec),
+              'C1R2 {:3f},'.format(r2_rec),
+              'C1R3 {:3f},'.format(r3_rec),
               'time {:4f}'.format(time.time() - t0))
 
     result = pd.DataFrame(result)
