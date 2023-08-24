@@ -65,7 +65,8 @@ class TRENDSPOT(torch.nn.Module):
         # )
 
         self.linear_sales = nn.Linear(out_channels*2, 1)
-        self.linear_inc_V = nn.Linear(out_channels, 2)
+        self.linear_inc_V = nn.Linear(out_channels, 1)
+        self.linear_inc_I = nn.Linear(out_channels, 1)
         self.act = nn.ReLU()
 
     def forward(self, data):
@@ -94,6 +95,6 @@ class TRENDSPOT(torch.nn.Module):
         pred = self.act(self.linear_sales(xcom2))
         pred_Vstar = self.act(self.linear_sales(xcom2_star))
         # (batch*J, out_channels) -> (batch*J, 1)
-        pred_inc = self.act(self.linear_inc_V(x2V))
+        pred_inc = self.act(self.linear_inc_V(x2V)+self.linear_inc_I(x2I))
 
         return pred.squeeze(-1), pred_Vstar.squeeze(-1), pred_inc, x2I, x2V
