@@ -64,6 +64,7 @@ class DataLoad():
     def __init__(self):
         data_dict = read_data_to_dict(args.file, {})
         df = pd.DataFrame.from_dict(data_dict).T
+
         # record all the existing values
         date_ = sorted(df['visite_time'].unique())
         content_ = sorted(df['content_id'].unique())
@@ -106,6 +107,8 @@ class DataLoad():
         ana_dt.to_csv(result_path+'analysis_count.csv')
         np.save(result_path+'dv_count.npy', sample_content_dv)
 
+
+        # # other analysis
         # feature_col = ['content_id','visite_time','expo_uv_1d','click_uv_1d','consume_uv_1d']
         # self.all_content_feature = []  # (content_num, time_step, feature_dim)
         # for c in content_:
@@ -123,7 +126,6 @@ class DataLoad():
         #     content_record[c] = pd.DataFrame(content_record[c])
         #
         # print(content_record)
-
 
         #
         # for c in content_:
