@@ -9,7 +9,8 @@ import argparse
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch_geometric.data import Data, Dataset, DataLoader
+from torch_geometric.data import Data, Dataset
+from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GCNConv, global_mean_pool
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, roc_auc_score
@@ -30,7 +31,7 @@ parser.add_argument('--exp_th', type=float, help='explore threshold', default=1.
 parser.add_argument('--seed', type=int, help='random seed', default=101)
 parser.add_argument('--gpu', type=int, help='idx for the gpu to use', default=0)
 parser.add_argument('--lr', type=float, help='learning rate', default=1e-4)
-parser.add_argument('--bs', type=int, help='batch size', default=16)
+parser.add_argument('--bs', type=int, help='batch size', default=32)
 parser.add_argument('--n_epoch', type=int, help='number of epochs', default=200)
 
 
@@ -118,6 +119,10 @@ class TSDataset(Dataset):
     def __init__(self, list):
         super().__init__()
         self.data_graph = list
+        target = []
+        for i in self.data_graph:
+            target.append(i.y)
+        print("Explore product prec: ", np.mean(target))
 
     def len(self):
         return len(self.data_graph)
@@ -179,7 +184,8 @@ def construct_feature(series_fea_j, day):
     else:
         y = np.sum(y_head7)/np.sum(y_past7)
     y_inc = 0 if y<=args.exp_th else 1
-    series_fea = series_fea_j[day-args.K:day,:].T # -> (fea_dim, K)
+    series_fea = series_fea_j[day-args.K:day,:].T.astype(np.float64) # -> (fea_dim, K)
+
     wA = 1-pairwise_distances(series_fea,metric='correlation') # [-1,1] means correlation
     wA = np.array(wA)
     wA = np.nan_to_num(wA, copy=False)
@@ -195,10 +201,9 @@ def construct_feature(series_fea_j, day):
     for e in pos_edge_index:
         i, j = e[0], e[1]
         edge_weight_index.append(wA[i,j])
-    edge_weight_index = np.array(edge_weight_index)
 
     graph = Data(edge_index=torch.LongTensor(pos_edge_index).t().contiguous(),
-                 edge_attr=torch.FloatTensor(edge_weight_index), x=torch.FloatTensor(list(series_fea)), y=torch.tensor(y_inc), num_nodes=series_fea.shape[0])
+                 edge_attr=torch.FloatTensor(edge_weight_index), x=torch.FloatTensor(series_fea), y=torch.tensor(y_inc), num_nodes=series_fea.shape[0])
     return graph
 
 
@@ -220,7 +225,7 @@ def main():
 
     train_data, test_data = TSDataset(train_sample_list), TSDataset(test_sample_list)
     train_loader = DataLoader(train_data, batch_size=args.bs, shuffle=True)
-    test_loader = DataLoader(test_data, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=args.bs, shuffle=False)
 
     result = {'epoch':[],'MSE':[],'MAE':[],'C1R1':[],'C1R2':[],'C1R3':[],'AUC':[],}
     for epoch in range(args.n_epoch):
@@ -234,7 +239,6 @@ def main():
             y_label = graph.y
             class_loss = contrastive_loss(y_label, out)
             loss = class_loss
-            print(loss.item())
             loss.backward()
             total_loss += loss.item()
             optimizer.step()
@@ -252,18 +256,17 @@ def main():
             true_inc = tgraph.y.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
             pred_inc= model(tgraph)
-            r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.8, dim=None, keepdim=False,
+            r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.5, dim=None, keepdim=False,
                                                         interpolation='higher')).detach().cpu().numpy()
-            r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.9, dim=None, keepdim=False,
+            r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.7, dim=None, keepdim=False,
                                                         interpolation='higher')).detach().cpu().numpy()
-            r3 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.95, dim=None, keepdim=False,
+            r3 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.8, dim=None, keepdim=False,
                                                         interpolation='higher')).detach().cpu().numpy()
 
             pred_inc_list.extend(pred_inc.detach().cpu().numpy())
             r1_list.extend(r1)
             r2_list.extend(r2)
             r3_list.extend(r3)
-
 
 
         r1_rec = classification_report(np.array(true_inc_list), np.array(r1_list), target_names=['class0', 'class1'],
