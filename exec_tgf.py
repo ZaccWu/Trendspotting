@@ -1,3 +1,4 @@
+import os
 import sys
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ from sklearn.metrics.pairwise import pairwise_distances
 parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
+parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=True)
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
 parser.add_argument('--gth_pos', type=float, help='correlation threshold', default=0.0)
@@ -31,7 +33,7 @@ parser.add_argument('--exp_th', type=float, help='explore threshold', default=1.
 parser.add_argument('--seed', type=int, help='random seed', default=101)
 parser.add_argument('--gpu', type=int, help='idx for the gpu to use', default=0)
 parser.add_argument('--lr', type=float, help='learning rate', default=1e-4)
-parser.add_argument('--bs', type=int, help='batch size', default=32)
+parser.add_argument('--bs', type=int, help='batch size', default=128)
 parser.add_argument('--n_epoch', type=int, help='number of epochs', default=200)
 
 
@@ -77,11 +79,12 @@ class ATT_LSTM(nn.Module):
         return att_ht
 
 class TRENDSPOT2(torch.nn.Module):
-    def __init__(self, lag, hid_dim=32, in_channels=32, out_channels=32, out_dim=1):
+    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
         super(TRENDSPOT2, self).__init__()
         self.dropout = 0.5
         self.training = True
-        self.att_lstm_series = ATT_LSTM(lag, 3, hid_dim, out_channels)
+        self.fea_dim = fea_dim
+        self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
         self.att_lstm_nodes = ATT_LSTM(lag, 1, hid_dim, out_channels)
         self.conv_1 = GCNConv(out_channels, hid_dim)
         self.conv_2 = GCNConv(hid_dim, out_channels)
@@ -94,7 +97,7 @@ class TRENDSPOT2(torch.nn.Module):
         # node_x: (fea_dim, K)*bs, edge_index: (E,2)*bs, edge_weight: (E)*bs
         node_x, edge_index, edge_weight = graph.x, graph.edge_index, graph.edge_attr
 
-        series_fea = node_x.reshape(-1,3,30).transpose(2,1) # (bs*fea_dim, K)->(bs, fea_dim, K)->(bs, K, fea_dim)
+        series_fea = node_x.reshape(-1,self.fea_dim,30).transpose(2,1) # (bs*fea_dim, K)->(bs, fea_dim, K)->(bs, K, fea_dim)
         emb_series = self.att_lstm_series(series_fea)  # (bs, K, fea_dim) -> (bs, 1, hidden)
         x1s = torch.squeeze(emb_series)  # x1s: (bs, hidden)
         if len(x1s.shape)==1:
@@ -196,12 +199,7 @@ def construct_feature(series_fea_j, day):
 
     A_pos = sp.coo_matrix(wA_pos - np.eye(len(wA_pos)))
     pos_edge_index = np.array([A_pos.row, A_pos.col]).T # (num_edges, 2)
-
-    edge_weight_index = []
-    for e in pos_edge_index:
-        i, j = e[0], e[1]
-        edge_weight_index.append(wA[i,j])
-
+    edge_weight_index = [wA[e[0], e[1]] for e in pos_edge_index]
     graph = Data(edge_index=torch.LongTensor(pos_edge_index).t().contiguous(),
                  edge_attr=torch.FloatTensor(edge_weight_index), x=torch.FloatTensor(series_fea), y=torch.tensor(y_inc), num_nodes=series_fea.shape[0])
     return graph
@@ -209,24 +207,31 @@ def construct_feature(series_fea_j, day):
 
 def main():
     # construct training & test samples
-    train_sample_list, test_sample_list = [], []
-    for j in range(100):
-        y = series[j,:,:]
-        series_fea_j = y[np.argsort(y[:,1])][:,2:]  # (time_step, fea_dim)
-        for day in range(args.K, 70):
-            graph = construct_feature(series_fea_j, day)
-            train_sample_list.append(graph)
-        for day in range(70,90):
-            graph = construct_feature(series_fea_j, day)
-            test_sample_list.append(graph)
+    if args.gen_dt == True:
+        train_sample_list, test_sample_list = [], []
+        for j in range(100):   # try 100 products
+            y = series[j,:,:]
+            series_fea_j = y[np.argsort(y[:,1])][:,2:]  # (time_step, fea_dim)
+            for day in range(args.K, 70):
+                graph = construct_feature(series_fea_j, day)
+                train_sample_list.append(graph)
+            for day in range(70,90):
+                graph = construct_feature(series_fea_j, day)
+                test_sample_list.append(graph)
+        train_data, test_data = TSDataset(train_sample_list), TSDataset(test_sample_list)
+        if not os.path.isdir('task_data/'):
+            os.makedirs('task_data/')
+        torch.save(train_data, 'task_data/train_dt.pt')
+        torch.save(test_data, 'task_data/test_dt.pt')
 
-    model = TRENDSPOT2(lag=args.K).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    train_data = torch.load('task_data/train_dt.pt')
+    test_data = torch.load('task_data/test_dt.pt')
 
-    train_data, test_data = TSDataset(train_sample_list), TSDataset(test_sample_list)
     train_loader = DataLoader(train_data, batch_size=args.bs, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=args.bs, shuffle=False)
 
+    model = TRENDSPOT2(lag=args.K, fea_dim=3).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     result = {'epoch':[],'MSE':[],'MAE':[],'C1R1':[],'C1R2':[],'C1R3':[],'AUC':[],}
     for epoch in range(args.n_epoch):
         t0 = time.time()
@@ -234,6 +239,7 @@ def main():
         model.training = True
         total_loss = 0
         for graph in train_loader:
+            graph = graph.to(device)
             optimizer.zero_grad()
             out = model(graph)
             y_label = graph.y
@@ -253,6 +259,7 @@ def main():
         pred_inc_list = []
         r1_list, r2_list, r3_list = [], [], []
         for tgraph in test_loader:
+            tgraph = tgraph.to(device)
             true_inc = tgraph.y.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
             pred_inc= model(tgraph)

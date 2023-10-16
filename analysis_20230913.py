@@ -67,46 +67,46 @@ class DataLoad():
         print(df['lead_pay_visitor_ids'].value_counts())
 
         # record all the existing values
-        # date_ = sorted(df['visite_time'].unique())
-        # content_ = sorted(df['content_id'].unique())
-        # columns = df.columns
-        # print("content_type:", df['content_type'].value_counts())
-        # print("account_role:", df['account_role'].value_counts())
-        # ana_col = columns[4:100]
-        # df[ana_col] = df[ana_col].astype(float)
-        # ana_dict = {
-        #     'max': df[ana_col].max(),
-        #     'mean': df[ana_col].mean(),
-        #     'std': df[ana_col].std(),
-        #     'q1': df[ana_col].quantile(q=0.1),
-        #     'q2': df[ana_col].quantile(q=0.2),
-        #     'q3': df[ana_col].quantile(q=0.3),
-        #     'q4': df[ana_col].quantile(q=0.4),
-        #     'q5': df[ana_col].quantile(q=0.5),
-        #     'q6': df[ana_col].quantile(q=0.6),
-        #     'q7': df[ana_col].quantile(q=0.7),
-        #     'q8': df[ana_col].quantile(q=0.8),
-        #     'q9': df[ana_col].quantile(q=0.9),
-        # }
-        # ana_dt = pd.DataFrame(ana_dict)
-        #
-        # dv_col = ['content_id','visite_time','click_uv_1d','consume_uv_1d','consume_uv_1d_valid']
-        # sample_content_dv = []
-        # start_time = time.time()
-        # for c in content_[:40000]:
-        #     dt = df.query('content_id == "' + c + '"')
-        #     dt.sort_values('visite_time')
-        #     content_c_feature = np.array(dt[dv_col])
-        #     if len(content_c_feature) == len(date_):
-        #         sample_content_dv.append(content_c_feature)
-        # end_time = time.time()
-        # print("Test running time: ", end_time-start_time)
-        # sample_content_dv = np.array(sample_content_dv)
-        #
-        # if not os.path.isdir(result_path):
-        #     os.makedirs(result_path)
-        # ana_dt.to_csv(result_path+'analysis_count.csv')
-        # np.save(result_path+'dv_count.npy', sample_content_dv)
+        date_ = sorted(df['visite_time'].unique())
+        content_ = sorted(df['content_id'].unique())
+        columns = df.columns
+        print("content_type:", df['content_type'].value_counts())
+        print("account_role:", df['account_role'].value_counts())
+        ana_col = columns[4:100]
+        df[ana_col] = df[ana_col].astype(float)
+        ana_dict = {
+            'max': df[ana_col].max(),
+            'mean': df[ana_col].mean(),
+            'std': df[ana_col].std(),
+            'q1': df[ana_col].quantile(q=0.1),
+            'q2': df[ana_col].quantile(q=0.2),
+            'q3': df[ana_col].quantile(q=0.3),
+            'q4': df[ana_col].quantile(q=0.4),
+            'q5': df[ana_col].quantile(q=0.5),
+            'q6': df[ana_col].quantile(q=0.6),
+            'q7': df[ana_col].quantile(q=0.7),
+            'q8': df[ana_col].quantile(q=0.8),
+            'q9': df[ana_col].quantile(q=0.9),
+        }
+        ana_dt = pd.DataFrame(ana_dict)
+
+        dv_col = ['content_id','visite_time','click_uv_1d','consume_uv_1d','consume_uv_1d_valid']
+        sample_content_dv = []
+        start_time = time.time()
+        for c in content_[:40000]:
+            dt = df.query('content_id == "' + c + '"')
+            dt.sort_values('visite_time')
+            content_c_feature = np.array(dt[dv_col])
+            if len(content_c_feature) == len(date_):
+                sample_content_dv.append(content_c_feature)
+        end_time = time.time()
+        print("Test running time: ", end_time-start_time)
+        sample_content_dv = np.array(sample_content_dv)
+
+        if not os.path.isdir(result_path):
+            os.makedirs(result_path)
+        ana_dt.to_csv(result_path+'analysis_count.csv')
+        np.save(result_path+'dv_count.npy', sample_content_dv)
 
 
         # # other analysis
