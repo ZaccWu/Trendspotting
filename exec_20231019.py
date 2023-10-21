@@ -23,7 +23,7 @@ parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--file', type=str, help='path of the data set', default='data/datasample2.csv')
-parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=True)
+parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
 parser.add_argument('--gth_pos', type=float, help='correlation threshold', default=0.0)
@@ -285,7 +285,7 @@ def main():
 
     model = TRENDSPOT2(lag=args.K, fea_dim=len(dv_col)-2).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    result = {'epoch':[],'MSE':[],'MAE':[],'C1R1':[],'C1R2':[],'C1R3':[],'AUC':[],}
+    result = {'epoch':[],'C1R1':[],'C1R2':[],'C1R3':[],'AUC':[],}
     for epoch in range(args.n_epoch):
         t0 = time.time()
         model.train()
@@ -316,17 +316,14 @@ def main():
             true_inc = tgraph.y.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
             pred_inc= model(tgraph)
-            r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.5, dim=None, keepdim=False,
-                                                        interpolation='higher')).detach().cpu().numpy()
-            r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.7, dim=None, keepdim=False,
-                                                        interpolation='higher')).detach().cpu().numpy()
-            r3 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.8, dim=None, keepdim=False,
-                                                        interpolation='higher')).detach().cpu().numpy()
+            r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.5, dim=None, keepdim=False))
+            r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.7, dim=None, keepdim=False))
+            r3 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.8, dim=None, keepdim=False))
 
             pred_inc_list.extend(pred_inc.detach().cpu().numpy())
-            r1_list.extend(r1)
-            r2_list.extend(r2)
-            r3_list.extend(r3)
+            r1_list.extend(r1.detach().cpu().numpy())
+            r2_list.extend(r2.detach().cpu().numpy())
+            r3_list.extend(r3.detach().cpu().numpy())
 
 
         r1_rec = classification_report(np.array(true_inc_list), np.array(r1_list), target_names=['class0', 'class1'],
