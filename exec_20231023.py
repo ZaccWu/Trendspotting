@@ -22,7 +22,8 @@ from sklearn.metrics.pairwise import pairwise_distances
 parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
-parser.add_argument('--file', type=str, help='path of the data set', default='data/datasample2.csv')
+parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
+parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_231023/')
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=True)
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
@@ -37,8 +38,8 @@ parser.add_argument('--exp_th', type=float, help='explore threshold', default=2.
 parser.add_argument('--seed', type=int, help='random seed', default=101)
 parser.add_argument('--gpu', type=int, help='idx for the gpu to use', default=0)
 parser.add_argument('--lr', type=float, help='learning rate', default=1e-4)
-parser.add_argument('--bs', type=int, help='batch size', default=1024)
-parser.add_argument('--n_epoch', type=int, help='number of epochs', default=100)
+parser.add_argument('--bs', type=int, help='batch size', default=1024)           # as large as possible
+parser.add_argument('--n_epoch', type=int, help='number of epochs', default=100) # 100
 
 
 try:
@@ -255,7 +256,7 @@ def construct_feature(series_fea_j, day):
 
 def main():
     # load data
-    data_dict = read_data_to_dict(args.file, {})
+    data_dict = read_data_to_dict(args.data_file, {})
     df = pd.DataFrame.from_dict(data_dict).T
     # record all the existing values
     date_ = sorted(df['visite_time'].unique())
@@ -265,20 +266,26 @@ def main():
     # select variables in interest (y is the last)
     dv_col = ['content_id', 'visite_time', 'click_uv_1d', 'consume_uv_1d_valid', 'favor_uv_1d', 'comment_uv_1d',
               'share_uv_1d', 'collect_uv_1d', 'attention_uv_1d', 'lead_shop_uv_1d', 'cart_uv_1d', 'consume_uv_1d']
-    sample_content_dv = []
+    sample_content_dv, sample_content_dv1 = [], []
     start_time = time.time()
 
+    st = 0
     for c in content_:
         dt = df.query('content_id == "' + c + '"')
         dt.sort_values('visite_time')
         content_c_feature = np.array(dt[dv_col])
-        if len(content_c_feature) == len(date_):    ## TODO: date time to be modified
+        st+=1
+        if len(content_c_feature) == len(date_):
             sample_content_dv.append(content_c_feature)
+            ## TODO: date time to be modified
+            if st<=10000:
+                sample_content_dv1.append(content_c_feature)
 
     end_time = time.time()
     print("Test running time: ", end_time - start_time)
     series = np.array(sample_content_dv)
     print(series.shape)
+    np.save(args.result_path + 'dv_count.npy', np.array(sample_content_dv1))
 
     num_content = len(sample_content_dv)
     # construct training & test samples
@@ -383,9 +390,11 @@ def main():
               'time {:3f}'.format(time.time() - t0))
 
     result = pd.DataFrame(result)
-    result.to_csv('result_1015.csv', index=False)
+    result.to_csv(args.result_path+'eval_result.csv', index=False)
 
 if __name__ == '__main__':
     # dv
     #series = np.load('data/dv_count.npy', allow_pickle=True)
+    if not os.path.isdir(args.result_path):
+        os.makedirs(args.result_path)
     main()
