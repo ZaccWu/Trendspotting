@@ -23,11 +23,13 @@ parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--file', type=str, help='path of the data set', default='data/datasample2.csv')
-parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
+parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=True)
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
-parser.add_argument('--gth_pos', type=float, help='correlation threshold', default=0.0)
-parser.add_argument('--exp_th', type=float, help='explore threshold', default=1.2)  # large data: 1.2
+parser.add_argument('--gth_pos', type=float, help='correlation threshold', default=0.2) # used in gen_dt process
+parser.add_argument('--exp_th', type=float, help='explore threshold', default=2.21) # large data: 2.21, used in gen_dt process
+# threshold in sample_dv (3 days): 3.33(top1%), 2.54(top2%), 2.21(top3%), 1.91(top5%), 1.56(top10%), 1.29(top20%)
+
 # # loss parameter
 # parser.add_argument('--reg1', type=float, help='reg1', default=1)
 # parser.add_argument('--reg2', type=float, help='reg2', default=1)
@@ -182,6 +184,26 @@ def transfer_pred(out, threshold):
     pred[torch.where(out >= threshold)] = 1
     return pred
 
+def find_positions_in_vru(list_a, list_b):
+    positions_dict = {}  # 创建一个字典用于存储列B表中每个元素的位置
+    for i, element in enumerate(list_b):
+        positions_dict[element] = i
+    result = []  # 用于存储列表A中每个元素在列表B中的位置
+    for element in list_a:
+        if element in positions_dict:
+            result.append(positions_dict[element])
+    return result
+
+def cal_ndcgK(vcu, vru):
+    # vru是正序的排名(按照推荐指数)
+    position = find_positions_in_vru(vcu, vru)
+    dcg = np.sum([1/np.log2(2+i) for i in position])
+    inter_len = len(set(vru) & set(vcu))
+    idcg = np.sum([1/np.log2(2+i) for i in range(inter_len)])
+    if idcg == 0:
+        return 0
+    return dcg/idcg
+
 def plot_tSNE(Zu, pred_u, title):
     # dimension reduction
     ts = manifold.TSNE(n_components=2, init='pca', random_state=42)
@@ -206,12 +228,12 @@ def plot_tSNE(Zu, pred_u, title):
 def construct_feature(series_fea_j, day):
     # series_fea_j: (time_step, fea_dim)
     series_fea_j = series_fea_j.astype(np.float64)
-    y_past7 = series_fea_j[day-7:day,-1]
-    y_head7 = series_fea_j[day:day+7,-1]
-    if np.sum(y_past7)==0:
+    y_past = series_fea_j[day-3:day,-1] # time for evaluate explosive: 3 days
+    y_head = series_fea_j[day:day+3,-1]
+    if np.sum(y_past)==0:
         y = 0
     else:
-        y = np.sum(y_head7)/np.sum(y_past7)
+        y = np.sum(y_head)/np.sum(y_past)
     y_inc = 0 if y<=args.exp_th else 1
     series_fea = series_fea_j[day-args.K:day,:].T # -> (fea_dim, K)
 
@@ -285,7 +307,7 @@ def main():
 
     model = TRENDSPOT2(lag=args.K, fea_dim=len(dv_col)-2).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    result = {'epoch':[],'C1R1':[],'C1R2':[],'C1R3':[],'AUC':[],}
+    result = {'epoch':[],'r1_rec':[],'r1_ndcg':[],'r2_rec':[],'r2_ndcg':[],'r3_rec':[],'r3_ndcg':[],'AUC':[],}
     for epoch in range(args.n_epoch):
         t0 = time.time()
         model.train()
@@ -316,8 +338,8 @@ def main():
             true_inc = tgraph.y.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
             pred_inc= model(tgraph)
-            r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.5, dim=None, keepdim=False))
-            r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.7, dim=None, keepdim=False))
+            r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.95, dim=None, keepdim=False))
+            r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.9, dim=None, keepdim=False))
             r3 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.8, dim=None, keepdim=False))
 
             pred_inc_list.extend(pred_inc.detach().cpu().numpy())
@@ -334,18 +356,29 @@ def main():
                                        output_dict=True)['class1']['recall']
         auc = roc_auc_score(np.array(true_inc_list),np.array(pred_inc_list))
 
+        _, pred_r1 = torch.topk(torch.tensor(pred_inc_list), k=len(np.nonzero(np.array(r1_list))[0]))  # pred_r1: (k_rec_content)
+        _, pred_r2 = torch.topk(torch.tensor(pred_inc_list), k=len(np.nonzero(np.array(r2_list))[0]))
+        _, pred_r3 = torch.topk(torch.tensor(pred_inc_list), k=len(np.nonzero(np.array(r3_list))[0]))
+
+        r1_ndcg = cal_ndcgK(np.nonzero(np.array(true_inc_list))[0], pred_r1.numpy())
+        r2_ndcg = cal_ndcgK(np.nonzero(np.array(true_inc_list))[0], pred_r2.numpy())
+        r3_ndcg = cal_ndcgK(np.nonzero(np.array(true_inc_list))[0], pred_r3.numpy())
+
 
         result['epoch'].append(epoch)
-        result['C1R1'].append(r1_rec)
-        result['C1R2'].append(r2_rec)
-        result['C1R3'].append(r3_rec)
+        result['r1_rec'].append(r1_rec)
+        result['r2_rec'].append(r2_rec)
+        result['r3_rec'].append(r3_rec)
+        result['r1_ndcg'].append(r1_ndcg)
+        result['r2_ndcg'].append(r2_ndcg)
+        result['r3_ndcg'].append(r3_ndcg)
         result['AUC'].append(auc)
 
         print("time of val epoch:", time.time() - t1)
         print('Epoch {:3d},'.format(epoch + 1),
-              'C1R1 {:3f},'.format(r1_rec),
-              'C1R2 {:3f},'.format(r2_rec),
-              'C1R3 {:3f},'.format(r3_rec),
+              'r1_rec {:3f},'.format(r1_rec),'r1_ndcg {:3f},'.format(r1_ndcg),
+              'r2_rec {:3f},'.format(r2_rec),'r2_ndcg {:3f},'.format(r2_ndcg),
+              'r3_rec {:3f},'.format(r3_rec),'r3_ndcg {:3f},'.format(r3_ndcg),
               'AUC {:3f},'.format(auc),
               'time {:3f}'.format(time.time() - t0))
 

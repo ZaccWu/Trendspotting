@@ -24,8 +24,10 @@ parser = argparse.ArgumentParser('Trendspotting')
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=True)
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
-parser.add_argument('--gth_pos', type=float, help='correlation threshold', default=0.0)
-parser.add_argument('--exp_th', type=float, help='explore threshold', default=1.2)
+parser.add_argument('--gth_pos', type=float, help='correlation threshold', default=0.2) # used in gen_dt process
+parser.add_argument('--exp_th', type=float, help='explore threshold', default=1.2) # large data: 2.21, used in gen_dt process
+# threshold in sample_dv (3 days): 3.33(top1%), 2.54(top2%), 2.21(top3%), 1.91(top5%), 1.56(top10%), 1.29(top20%)
+
 # # loss parameter
 # parser.add_argument('--reg1', type=float, help='reg1', default=1)
 # parser.add_argument('--reg2', type=float, help='reg2', default=1)
@@ -180,12 +182,12 @@ def plot_tSNE(Zu, pred_u, title):
 
 def construct_feature(series_fea_j, day):
     # series_fea_j: (time_step, fea_dim)
-    y_past7 = series_fea_j[day-7:day,-1]
-    y_head7 = series_fea_j[day:day+7,-1]
-    if np.sum(y_past7)==0:
+    y_past = series_fea_j[day-3:day,-1] # time for evaluate explosive: 3 days
+    y_head = series_fea_j[day:day+3,-1]
+    if np.sum(y_past)==0:
         y = 0
     else:
-        y = np.sum(y_head7)/np.sum(y_past7)
+        y = np.sum(y_head)/np.sum(y_past)
     y_inc = 0 if y<=args.exp_th else 1
     series_fea = series_fea_j[day-args.K:day,:].T.astype(np.float64) # -> (fea_dim, K)
 
@@ -263,9 +265,9 @@ def main():
             true_inc = tgraph.y.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
             pred_inc= model(tgraph)
-            r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.5, dim=None, keepdim=False,
+            r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.95, dim=None, keepdim=False,
                                                         interpolation='higher')).detach().cpu().numpy()
-            r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.7, dim=None, keepdim=False,
+            r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.9, dim=None, keepdim=False,
                                                         interpolation='higher')).detach().cpu().numpy()
             r3 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.8, dim=None, keepdim=False,
                                                         interpolation='higher')).detach().cpu().numpy()
