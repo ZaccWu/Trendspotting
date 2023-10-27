@@ -274,7 +274,7 @@ def main():
         dt = df.query('content_id == "' + c + '"')
         dt.sort_values('visite_time')
         content_c_feature = np.array(dt[dv_col])
-        st+=1
+        st+=1   # 有部分content是不够97天的
         if len(content_c_feature) == len(date_):
             sample_content_dv.append(content_c_feature)
             ## TODO: date time to be modified
