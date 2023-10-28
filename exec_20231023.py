@@ -23,10 +23,15 @@ parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
-parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_231023/')
-parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=True)
+parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_231028/')
+parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
+parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
+
+parser.add_argument('--model', type=str, help='choose model', default='wo_g') # 'full', 'wo_ts', 'wo_g'
+
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
+parser.add_argument('--pts', type=int, help='time for evaluate explosive', default=3)
 parser.add_argument('--gth_pos', type=float, help='correlation threshold', default=0.2) # used in gen_dt process
 parser.add_argument('--exp_th', type=float, help='explore threshold', default=2.21) # large data: 2.21, used in gen_dt process
 # threshold in sample_dv (3 days): 3.33(top1%), 2.54(top2%), 2.21(top3%), 1.91(top5%), 1.56(top10%), 1.29(top20%)
@@ -116,14 +121,12 @@ class ATT_LSTM(nn.Module):
 class TRENDSPOT2(torch.nn.Module):
     def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
         super(TRENDSPOT2, self).__init__()
-        self.dropout = 0.5
         self.training = True
         self.fea_dim = fea_dim
         self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
         self.att_lstm_nodes = ATT_LSTM(lag, 1, hid_dim, out_channels)
         self.conv_1 = GCNConv(out_channels, hid_dim)
         self.conv_2 = GCNConv(hid_dim, out_channels)
-
         self.linear_sales = nn.Linear(out_channels*2, 1)
         self.act = nn.ReLU()
 
@@ -131,18 +134,15 @@ class TRENDSPOT2(torch.nn.Module):
         # input: graph batch
         # node_x: (fea_dim, K)*bs, edge_index: (E,2)*bs, edge_weight: (E)*bs
         node_x, edge_index, edge_weight = graph.x, graph.edge_index, graph.edge_attr
-
-        series_fea = node_x.reshape(-1,self.fea_dim,30).transpose(2,1) # (bs*fea_dim, K)->(bs, fea_dim, K)->(bs, K, fea_dim)
+        series_fea = node_x.reshape(-1,self.fea_dim,args.K).transpose(2,1) # (bs*fea_dim, K)->(bs, fea_dim, K)->(bs, K, fea_dim)
         emb_series = self.att_lstm_series(series_fea)  # (bs, K, fea_dim) -> (bs, 1, hidden)
         x1s = torch.squeeze(emb_series)  # x1s: (bs, hidden)
         if len(x1s.shape)==1:
             x1s = x1s.unsqueeze(0)
 
-
         node_fea = node_x.unsqueeze(1).transpose(2,1) # (bs*fea_num, K)->(bs*fea_num, 1, K)->(bs*fea_num, K, 1)
         emb_node = self.att_lstm_nodes(node_fea)  # (bs*fea_num, K, 1) -> (bs*fea_num, 1, hidden)
         emb_node = torch.squeeze(emb_node) # (bs*fea_num, 1, hidden)
-
         x2n = self.conv_1(emb_node, edge_index, edge_weight)
         x2n = F.dropout(x2n, p=0.5, training=self.training)
         x2n = self.conv_2(x2n, edge_index, edge_weight) # x2n: (fea_num, hidden)
@@ -151,6 +151,54 @@ class TRENDSPOT2(torch.nn.Module):
         pred = self.act(self.linear_sales(xcom2))
         return pred.squeeze(-1)
 
+
+class WO_TimeSeris(torch.nn.Module):
+    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
+        super(WO_TimeSeris, self).__init__()
+        self.training = True
+        self.fea_dim = fea_dim
+        self.att_lstm_nodes = ATT_LSTM(lag, 1, hid_dim, out_channels)
+        self.conv_1 = GCNConv(out_channels, hid_dim)
+        self.conv_2 = GCNConv(hid_dim, out_channels)
+        self.linear_sales = nn.Linear(out_channels, 1)
+        self.act = nn.ReLU()
+
+    def forward(self, graph):
+        # input: graph batch
+        # node_x: (fea_dim, K)*bs, edge_index: (E,2)*bs, edge_weight: (E)*bs
+        node_x, edge_index, edge_weight = graph.x, graph.edge_index, graph.edge_attr
+        node_fea = node_x.unsqueeze(1).transpose(2,1) # (bs*fea_num, K)->(bs*fea_num, 1, K)->(bs*fea_num, K, 1)
+        emb_node = self.att_lstm_nodes(node_fea)  # (bs*fea_num, K, 1) -> (bs*fea_num, 1, hidden)
+        emb_node = torch.squeeze(emb_node) # (bs*fea_num, 1, hidden)
+        x2n = self.conv_1(emb_node, edge_index, edge_weight)
+        x2n = F.dropout(x2n, p=0.5, training=self.training)
+        x2n = self.conv_2(x2n, edge_index, edge_weight) # x2n: (fea_num, hidden)
+        x2n = global_mean_pool(x2n, graph.batch) # graph-level readout -> (bs, hidden)
+        xcom2 = torch.cat([x2n], dim=1)
+        pred = self.act(self.linear_sales(xcom2))
+        return pred.squeeze(-1)
+
+class WO_Graph(torch.nn.Module):
+    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
+        super(WO_Graph, self).__init__()
+        self.training = True
+        self.fea_dim = fea_dim
+        self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.linear_sales = nn.Linear(out_channels, 1)
+        self.act = nn.LeakyReLU()
+
+    def forward(self, graph):
+        # input: graph batch
+        # node_x: (fea_dim, K)*bs, edge_index: (E,2)*bs, edge_weight: (E)*bs
+        node_x, edge_index, edge_weight = graph.x, graph.edge_index, graph.edge_attr
+        series_fea = node_x.reshape(-1,self.fea_dim,args.K).transpose(2,1) # (bs*fea_dim, K)->(bs, fea_dim, K)->(bs, K, fea_dim)
+        emb_series = self.att_lstm_series(series_fea)  # (bs, K, fea_dim) -> (bs, 1, hidden)
+        x1s = torch.squeeze(emb_series)  # x1s: (bs, hidden)
+        if len(x1s.shape)==1:
+            x1s = x1s.unsqueeze(0)
+        xcom2 = torch.cat([x1s], dim=1)
+        pred = self.act(self.linear_sales(xcom2))
+        return pred.squeeze(-1)
 
 
 class TSDataset(Dataset):
@@ -229,8 +277,8 @@ def plot_tSNE(Zu, pred_u, title):
 def construct_feature(series_fea_j, day):
     # series_fea_j: (time_step, fea_dim)
     series_fea_j = series_fea_j.astype(np.float64)
-    y_past = series_fea_j[day-3:day,-1] # time for evaluate explosive: 3 days
-    y_head = series_fea_j[day:day+3,-1]
+    y_past = series_fea_j[day-args.pts:day,-1]
+    y_head = series_fea_j[day:day+args.pts,-1]
     if np.sum(y_past)==0:
         y = 0
     else:
@@ -255,39 +303,38 @@ def construct_feature(series_fea_j, day):
 
 
 def main():
-    # load data
-    data_dict = read_data_to_dict(args.data_file, {})
-    df = pd.DataFrame.from_dict(data_dict).T
-    # record all the existing values
-    date_ = sorted(df['visite_time'].unique())
-    content_ = sorted(df['content_id'].unique())
-    columns = df.columns
+    if args.online == True:
+        # load data
+        data_dict = read_data_to_dict(args.data_file, {})
+        df = pd.DataFrame.from_dict(data_dict).T
+        # record all the existing values
+        date_ = sorted(df['visite_time'].unique())
+        content_ = sorted(df['content_id'].unique())
+        columns = df.columns
+        # select variables in interest (y is the last)
+        dv_col = ['content_id', 'visite_time', 'click_uv_1d', 'consume_uv_1d_valid', 'favor_uv_1d', 'comment_uv_1d',
+                  'share_uv_1d', 'collect_uv_1d', 'attention_uv_1d', 'lead_shop_uv_1d', 'cart_uv_1d', 'consume_uv_1d']
+        sample_content_dv = []
+        start_time = time.time()
+        st = 0
+        for c in content_:
+            dt = df.query('content_id == "' + c + '"')
+            dt.sort_values('visite_time')
+            content_c_feature = np.array(dt[dv_col])
+            st+=1   # 有部分content是不够97天的
+            if len(content_c_feature) == len(date_):
+                sample_content_dv.append(content_c_feature)
+        end_time = time.time()
+        print("Test running time: ", end_time - start_time)
+        series = np.array(sample_content_dv)
+        fea_dim = len(dv_col)-2
 
-    # select variables in interest (y is the last)
-    dv_col = ['content_id', 'visite_time', 'click_uv_1d', 'consume_uv_1d_valid', 'favor_uv_1d', 'comment_uv_1d',
-              'share_uv_1d', 'collect_uv_1d', 'attention_uv_1d', 'lead_shop_uv_1d', 'cart_uv_1d', 'consume_uv_1d']
-    sample_content_dv, sample_content_dv1 = [], []
-    start_time = time.time()
+    else:
+        series = np.load('data/dv_count2.npy', allow_pickle=True)
+        fea_dim = series.shape[-1]-2
 
-    st = 0
-    for c in content_:
-        dt = df.query('content_id == "' + c + '"')
-        dt.sort_values('visite_time')
-        content_c_feature = np.array(dt[dv_col])
-        st+=1   # 有部分content是不够97天的
-        if len(content_c_feature) == len(date_):
-            sample_content_dv.append(content_c_feature)
-            ## TODO: date time to be modified
-            if st<=10000:
-                sample_content_dv1.append(content_c_feature)
-
-    end_time = time.time()
-    print("Test running time: ", end_time - start_time)
-    series = np.array(sample_content_dv)
     print(series.shape)
-    np.save(args.result_path + 'dv_count.npy', np.array(sample_content_dv1))
-
-    num_content = len(sample_content_dv)
+    num_content = series.shape[0]
     # construct training & test samples
     if args.gen_dt == True:
         train_sample_list, test_sample_list = [], []
@@ -297,22 +344,31 @@ def main():
             for day in range(args.K, 70):
                 graph = construct_feature(series_fea_j, day)
                 train_sample_list.append(graph)
-            for day in range(70,90):
+            for day in range(70, 97-args.pts):
                 graph = construct_feature(series_fea_j, day)
                 test_sample_list.append(graph)
+
         train_data, test_data = TSDataset(train_sample_list), TSDataset(test_sample_list)
         if not os.path.isdir('task_data/'):
             os.makedirs('task_data/')
         torch.save(train_data, 'task_data/train_dt.pt')
         torch.save(test_data, 'task_data/test_dt.pt')
 
+    print("[1] Start loading...")
     train_data = torch.load('task_data/train_dt.pt')
     test_data = torch.load('task_data/test_dt.pt')
+    print("[2] Finish loading...")
 
     train_loader = DataLoader(train_data, batch_size=args.bs, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=args.bs, shuffle=False)
 
-    model = TRENDSPOT2(lag=args.K, fea_dim=len(dv_col)-2).to(device)
+    if args.model == 'full':
+        model = TRENDSPOT2(lag=args.K, fea_dim=fea_dim).to(device)
+    elif args.model == 'wo_ts':
+        model = WO_TimeSeris(lag=args.K, fea_dim=fea_dim).to(device)
+    elif args.model == 'wo_g':
+        model = WO_Graph(lag=args.K, fea_dim=fea_dim).to(device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     result = {'epoch':[],'r1_rec':[],'r1_ndcg':[],'r2_rec':[],'r2_ndcg':[],'r3_rec':[],'r3_ndcg':[],'AUC':[],}
     for epoch in range(args.n_epoch):
@@ -390,11 +446,9 @@ def main():
               'time {:3f}'.format(time.time() - t0))
 
     result = pd.DataFrame(result)
-    result.to_csv(args.result_path+'eval_result.csv', index=False)
+    result.to_csv(args.result_path+args.model+'_eval_result.csv', index=False)
 
 if __name__ == '__main__':
-    # dv
-    #series = np.load('data/dv_count.npy', allow_pickle=True)
     if not os.path.isdir(args.result_path):
         os.makedirs(args.result_path)
     main()
