@@ -2,4 +2,5 @@ previous_version:
 * exec_c，exec_ct：使用user共点击构建product weighted graph
 
 exec_tgf：使用sample dv数据
-exec_xxxx：使用在线测试数据
+exec_20231023：多维时间序列+Variable Correlation Graph（+Ablation版本）
+exec_20231031：无需Construct Variable Correlation Graph

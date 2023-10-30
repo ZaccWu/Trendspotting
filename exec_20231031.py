@@ -11,8 +11,10 @@ import argparse
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch_geometric.data import Data, Dataset
-from torch_geometric.loader import DataLoader
+# from torch_geometric.data import Data, Dataset
+# from torch_geometric.loader import DataLoader
+
+from torch.utils.data import DataLoader
 from torch_geometric.nn import GCNConv, global_mean_pool
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, roc_auc_score
@@ -23,7 +25,7 @@ parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
-parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_231023/')
+parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_231031/')
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
 
@@ -156,70 +158,21 @@ class TRENDSPOT2(torch.nn.Module):
         return pred.squeeze(-1)
 
 
-class WO_TimeSeris(torch.nn.Module):
-    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
-        super(WO_TimeSeris, self).__init__()
-        self.training = True
-        self.fea_dim = fea_dim
-        self.att_lstm_nodes = ATT_LSTM(lag, 1, hid_dim, out_channels)
-        self.conv_1 = GCNConv(out_channels, hid_dim)
-        self.conv_2 = GCNConv(hid_dim, out_channels)
-        self.linear_sales = nn.Linear(out_channels, 1)
-        self.act = nn.ReLU()
-
-    def forward(self, graph):
-        # input: graph batch
-        # node_x: (fea_dim, K)*bs, edge_index: (E,2)*bs, edge_weight: (E)*bs
-        node_x, edge_index, edge_weight = graph.x, graph.edge_index, graph.edge_attr
-        node_fea = node_x.unsqueeze(1).transpose(2,1) # (bs*fea_num, K)->(bs*fea_num, 1, K)->(bs*fea_num, K, 1)
-        emb_node = self.att_lstm_nodes(node_fea)  # (bs*fea_num, K, 1) -> (bs*fea_num, 1, hidden)
-        emb_node = torch.squeeze(emb_node) # (bs*fea_num, 1, hidden)
-        x2n = self.conv_1(emb_node, edge_index, edge_weight)
-        x2n = F.dropout(x2n, p=0.5, training=self.training)
-        x2n = self.conv_2(x2n, edge_index, edge_weight) # x2n: (fea_num, hidden)
-        x2n = global_mean_pool(x2n, graph.batch) # graph-level readout -> (bs, hidden)
-        xcom2 = torch.cat([x2n], dim=1)
-        pred = self.act(self.linear_sales(xcom2))
-        return pred.squeeze(-1)
-
-class WO_Graph(torch.nn.Module):
-    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
-        super(WO_Graph, self).__init__()
-        self.training = True
-        self.fea_dim = fea_dim
-        self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
-        self.linear_sales = nn.Linear(out_channels, 1)
-        self.act = nn.LeakyReLU()
-
-    def forward(self, graph):
-        # input: graph batch
-        # node_x: (fea_dim, K)*bs, edge_index: (E,2)*bs, edge_weight: (E)*bs
-        node_x, edge_index, edge_weight = graph.x, graph.edge_index, graph.edge_attr
-        series_fea = node_x.reshape(-1,self.fea_dim,args.K).transpose(2,1) # (bs*fea_dim, K)->(bs, fea_dim, K)->(bs, K, fea_dim)
-        emb_series = self.att_lstm_series(series_fea)  # (bs, K, fea_dim) -> (bs, 1, hidden)
-        x1s = torch.squeeze(emb_series)  # x1s: (bs, hidden)
-        if len(x1s.shape)==1:
-            x1s = x1s.unsqueeze(0)
-        xcom2 = torch.cat([x1s], dim=1)
-        pred = self.act(self.linear_sales(xcom2))
-        return pred.squeeze(-1)
-
-
-class TSDataset(Dataset):
-    def __init__(self, list):
-        super().__init__()
-        self.data_graph = list
-        target = []
-        for i in self.data_graph:
-            target.append(i.y)
-        print("Explore product prec: ", np.mean(target))
-
-    def len(self):
-        return len(self.data_graph)
-
-    def get(self, idx):
-        data = self.data_graph[idx]
-        return data
+# class TSDataset(Dataset):
+#     def __init__(self, list):
+#         super().__init__()
+#         self.data_graph = list
+#         target = []
+#         for i in self.data_graph:
+#             target.append(i.y)
+#         print("Explore product prec: ", np.mean(target))
+#
+#     def len(self):
+#         return len(self.data_graph)
+#
+#     def get(self, idx):
+#         data = self.data_graph[idx]
+#         return data
 
 def contrastive_loss(target, pred_score, m=5):
     # target: 0-1, pred_score: float
@@ -257,6 +210,27 @@ def cal_ndcgK(vcu, vru):
         return 0
     return dcg/idcg
 
+def plot_tSNE(Zu, pred_u, title):
+    # dimension reduction
+    ts = manifold.TSNE(n_components=2, init='pca', random_state=42)
+    x_ts = ts.fit_transform(Zu) # x_ts: (N_user, 2)
+    x_min, x_max = x_ts.min(0), x_ts.max(0)
+    x_final = (x_ts - x_min) / (x_max - x_min)
+    S_data = np.hstack((x_final, np.array(pred_u).reshape(-1,1)))  # concat dim-reduced feature
+    S_data = pd.DataFrame({'x': S_data[:, 0], 'y': S_data[:, 1], 'label': S_data[:, 2]}) # S_data: (N_sample, 3)
+    colors = ['blue','red']
+
+    plt.figure(figsize=(10, 10))
+    for cla in range(2):
+        X = S_data.loc[S_data['label'] == cla]['x']
+        Y = S_data.loc[S_data['label'] == cla]['y']
+        plt.scatter(X, Y, cmap='brg', s=100, marker='.', c=colors[cla], edgecolors=colors[cla], alpha=0.9,)
+        plt.xticks([])
+        plt.yticks([])
+    plt.title(title, fontsize=32, fontweight='normal', pad=20)
+    plt.savefig('img/embedding/'+title + '.jpg')
+    #plt.show()
+
 def construct_feature(series_fea_j, day):
     # series_fea_j: (time_step, fea_dim)
     series_fea_j = series_fea_j.astype(np.float64)
@@ -268,21 +242,22 @@ def construct_feature(series_fea_j, day):
         y = np.sum(y_head)/np.sum(y_past)
     y_inc = 0 if y<=args.exp_th else 1
     series_fea = series_fea_j[day-args.K:day,:].T # -> (fea_dim, K)
+    return series_fea
 
-    wA = 1-pairwise_distances(series_fea,metric='correlation') # [-1,1] means correlation
-    wA = np.array(wA)
-    wA = np.nan_to_num(wA, copy=False)
-    wA_pos = wA.copy()
-    wA[wA < args.gth_pos] = 0
-    wA_pos[wA_pos < args.gth_pos] = 0
-    wA_pos[wA_pos >= args.gth_pos] = 1
-
-    A_pos = sp.coo_matrix(wA_pos - np.eye(len(wA_pos)))
-    pos_edge_index = np.array([A_pos.row, A_pos.col]).T # (num_edges, 2)
-    edge_weight_index = [wA[e[0], e[1]] for e in pos_edge_index]
-    graph = Data(edge_index=torch.LongTensor(pos_edge_index).t().contiguous(),
-                 edge_attr=torch.FloatTensor(edge_weight_index), x=torch.FloatTensor(series_fea), y=torch.tensor(y_inc), num_nodes=series_fea.shape[0])
-    return graph
+    # wA = 1-pairwise_distances(series_fea,metric='correlation') # [-1,1] means correlation
+    # wA = np.array(wA)
+    # wA = np.nan_to_num(wA, copy=False)
+    # wA_pos = wA.copy()
+    # wA[wA < args.gth_pos] = 0
+    # wA_pos[wA_pos < args.gth_pos] = 0
+    # wA_pos[wA_pos >= args.gth_pos] = 1
+    #
+    # A_pos = sp.coo_matrix(wA_pos - np.eye(len(wA_pos)))
+    # pos_edge_index = np.array([A_pos.row, A_pos.col]).T # (num_edges, 2)
+    # edge_weight_index = [wA[e[0], e[1]] for e in pos_edge_index]
+    # graph = Data(edge_index=torch.LongTensor(pos_edge_index).t().contiguous(),
+    #              edge_attr=torch.FloatTensor(edge_weight_index), x=torch.FloatTensor(series_fea), y=torch.tensor(y_inc), num_nodes=series_fea.shape[0])
+    # return graph
 
 
 def main():
@@ -325,13 +300,14 @@ def main():
             y = series[j,:,:]
             series_fea_j = y[np.argsort(y[:,1])][:,2:]  # (time_step, fea_dim), remove 'content_id', 'visite_time'
             for day in range(args.K, 70):
-                graph = construct_feature(series_fea_j, day)
-                train_sample_list.append(graph)
+                ser_sample = construct_feature(series_fea_j, day)
+                train_sample_list.append(ser_sample)
             for day in range(70, 97-args.pts):
-                graph = construct_feature(series_fea_j, day)
-                test_sample_list.append(graph)
+                ser_sample = construct_feature(series_fea_j, day)
+                test_sample_list.append(ser_sample)
 
-        train_data, test_data = TSDataset(train_sample_list), TSDataset(test_sample_list)
+        #train_data, test_data = TSDataset(train_sample_list), TSDataset(test_sample_list)
+        train_data, test_data = torch.LongTensor(train_sample_list), torch.LongTensor(test_sample_list)
         if not os.path.isdir('task_data/'):
             os.makedirs('task_data/')
         torch.save(train_data, 'task_data/train_dt.pt')
@@ -347,10 +323,6 @@ def main():
 
     if args.model == 'full1':
         model = TRENDSPOT2(lag=args.K, fea_dim=fea_dim).to(device)
-    elif args.model == 'wo_ts':
-        model = WO_TimeSeris(lag=args.K, fea_dim=fea_dim).to(device)
-    elif args.model == 'wo_g':
-        model = WO_Graph(lag=args.K, fea_dim=fea_dim).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     result = {'epoch':[],'r1_rec':[],'r1_ndcg':[],'r2_rec':[],'r2_ndcg':[],'r3_rec':[],'r3_ndcg':[],'AUC':[],}
@@ -359,8 +331,8 @@ def main():
         model.train()
         model.training = True
         total_loss = 0
-        for graph in train_loader:
-            graph = graph.to(device)
+        for data in train_loader:
+            data = data.to(device)
             optimizer.zero_grad()
             out = model(graph)
             y_label = graph.y
