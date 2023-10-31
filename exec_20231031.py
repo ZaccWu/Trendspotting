@@ -10,11 +10,12 @@ import time
 import argparse
 import torch.nn as nn
 import torch.nn.functional as F
+import pickle
 
 # from torch_geometric.data import Data, Dataset
 # from torch_geometric.loader import DataLoader
 
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from torch_geometric.nn import GCNConv, global_mean_pool
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, roc_auc_score
@@ -26,7 +27,7 @@ parser = argparse.ArgumentParser('Trendspotting')
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
 parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_231031/')
-parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
+parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=True)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
 
 parser.add_argument('--model', type=str, help='choose model', default='full1') # 'full', 'wo_ts', 'wo_g'
@@ -38,9 +39,9 @@ parser.add_argument('--gth_pos', type=float, help='correlation threshold', defau
 parser.add_argument('--exp_th', type=float, help='explore threshold', default=2.21) # large data: 2.21, used in gen_dt process
 # threshold in sample_dv (3 days): 3.33(top1%), 2.54(top2%), 2.21(top3%), 1.91(top5%), 1.56(top10%), 1.29(top20%)
 
-# # loss parameter
-# parser.add_argument('--reg1', type=float, help='reg1', default=1)
-# parser.add_argument('--reg2', type=float, help='reg2', default=1)
+# loss parameter
+parser.add_argument('--reg1', type=float, help='reg1', default=0.001)
+parser.add_argument('--reg2', type=float, help='reg2', default=0.01)
 # # training parameter
 parser.add_argument('--seed', type=int, help='random seed', default=101)
 parser.add_argument('--gpu', type=int, help='idx for the gpu to use', default=0)
@@ -125,54 +126,38 @@ class TRENDSPOT2(torch.nn.Module):
         super(TRENDSPOT2, self).__init__()
         self.training = True
         self.fea_dim = fea_dim
-        self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
-        self.att_lstm_nodes = ATT_LSTM(lag, 1, hid_dim, out_channels)
-        self.conv_1 = GCNConv(out_channels, hid_dim)
-        #self.conv_1 = GCNConv(1, hid_dim)
-        self.conv_2 = GCNConv(hid_dim, out_channels)
+        self.z_dim = out_channels
+        self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels*2)
         self.linear_sales = nn.Linear(out_channels*2, 1)
+        self.linear_trend = nn.Linear(out_channels, 1)
         self.act = nn.ReLU()
 
-    def forward(self, graph):
-        # input: graph batch
-        # node_x: (fea_dim, K)*bs, edge_index: (E,2)*bs, edge_weight: (E)*bs
-        node_x, edge_index, edge_weight = graph.x, graph.edge_index, graph.edge_attr
-        series_fea = node_x.reshape(-1,self.fea_dim,args.K).transpose(2,1) # (bs*fea_dim, K)->(bs, fea_dim, K)->(bs, K, fea_dim)
-        emb_series = self.att_lstm_series(series_fea)  # (bs, K, fea_dim) -> (bs, 1, hidden)
-        x1s = torch.squeeze(emb_series)  # x1s: (bs, hidden)
+    def forward(self, x):
+        # input (x): (bs, fea_dim, K)
+        series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
+        tsa_emb = self.att_lstm_series(series_x)  # (bs, K, fea_dim) -> (bs, 1, hidden)
+        x1s = torch.squeeze(tsa_emb)  # x1s: (bs, hidden)
         if len(x1s.shape)==1:
             x1s = x1s.unsqueeze(0)
 
-        node_fea = node_x.unsqueeze(1).transpose(2,1) # (bs*fea_num, K)->(bs*fea_num, 1, K)->(bs*fea_num, K, 1)
-        emb_node = self.att_lstm_nodes(node_fea)  # (bs*fea_num, K, 1) -> (bs*fea_num, 1, hidden)
-        emb_node = torch.squeeze(emb_node) # (bs*fea_num, 1, hidden)
+        zI, zV = x1s[:,:self.z_dim], x1s[:,self.z_dim:]
+        zV_star = zV[torch.randperm(zV.size(0))]
+        x1s_star = torch.cat([zI, zV_star], dim=1)
+        pred_sales = self.act(self.linear_sales(x1s_star))  # (bs, hidden) -> (bs,1)
+        pred_trend = self.act(self.linear_trend(zV))
+        return pred_sales.squeeze(-1), pred_trend.squeeze(-1), zI, zV
 
-        # emb_node = torch.squeeze(node_fea)[:,-1]
-        # emb_node = torch.unsqueeze(emb_node,-1)
-        x2n = self.conv_1(emb_node, edge_index, edge_weight)
-        x2n = F.dropout(x2n, p=0.5, training=self.training)
-        x2n = self.conv_2(x2n, edge_index, edge_weight) # x2n: (fea_num, hidden)
-        x2n = global_mean_pool(x2n, graph.batch) # graph-level readout -> (bs, hidden)
-        xcom2 = torch.cat([x1s, x2n], dim=1)    # xcom2: (bs, 2*hidden)
-        pred = self.act(self.linear_sales(xcom2))
-        return pred.squeeze(-1)
-
-
-# class TSDataset(Dataset):
-#     def __init__(self, list):
-#         super().__init__()
-#         self.data_graph = list
-#         target = []
-#         for i in self.data_graph:
-#             target.append(i.y)
-#         print("Explore product prec: ", np.mean(target))
-#
-#     def len(self):
-#         return len(self.data_graph)
-#
-#     def get(self, idx):
-#         data = self.data_graph[idx]
-#         return data
+class TSADataset(Dataset):
+    def __init__(self, x_l, y_l, y_ls):
+        super(TSADataset, self).__init__()
+        self.x = torch.FloatTensor(x_l)
+        self.y = torch.FloatTensor(y_l)
+        self.ys = torch.FloatTensor(y_ls)
+        print("Explore product prec: ", torch.mean(self.y))
+    def __getitem__(self, idx):
+        return self.x[idx], self.y[idx], self.ys[idx]
+    def __len__(self):
+        return (len(self.y))
 
 def contrastive_loss(target, pred_score, m=5):
     # target: 0-1, pred_score: float
@@ -210,6 +195,11 @@ def cal_ndcgK(vcu, vru):
         return 0
     return dcg/idcg
 
+def decorrelate(embI, embV):
+	embI, embV = F.normalize(embI, dim=1), F.normalize(embV, dim=1)
+	orthogonal = torch.abs(torch.sum(torch.mul(embI, embV), dim=1))
+	return torch.sum(orthogonal)
+
 def plot_tSNE(Zu, pred_u, title):
     # dimension reduction
     ts = manifold.TSNE(n_components=2, init='pca', random_state=42)
@@ -236,13 +226,15 @@ def construct_feature(series_fea_j, day):
     series_fea_j = series_fea_j.astype(np.float64)
     y_past = series_fea_j[day-args.pts:day,-1]
     y_head = series_fea_j[day:day+args.pts,-1]
+    y_sales = series_fea_j[day+args.pts-1,-1]
     if np.sum(y_past)==0:
         y = 0
     else:
         y = np.sum(y_head)/np.sum(y_past)
     y_inc = 0 if y<=args.exp_th else 1
     series_fea = series_fea_j[day-args.K:day,:].T # -> (fea_dim, K)
-    return series_fea
+
+    return series_fea, y_inc, y_sales
 
     # wA = 1-pairwise_distances(series_fea,metric='correlation') # [-1,1] means correlation
     # wA = np.array(wA)
@@ -291,31 +283,47 @@ def main():
         series = np.load('data/dv_count2.npy', allow_pickle=True)
         fea_dim = series.shape[-1]-2
 
-    print(series.shape)
+    print("[0] input shape: ", series.shape)
     num_content = series.shape[0]
     # construct training & test samples
     if args.gen_dt == True:
-        train_sample_list, test_sample_list = [], []
+        train_x_list, test_x_list, train_y_list, test_y_list = [], [], [], []
+        train_ys_list, test_ys_list = [], []
         for j in range(num_content):
             y = series[j,:,:]
             series_fea_j = y[np.argsort(y[:,1])][:,2:]  # (time_step, fea_dim), remove 'content_id', 'visite_time'
             for day in range(args.K, 70):
-                ser_sample = construct_feature(series_fea_j, day)
-                train_sample_list.append(ser_sample)
-            for day in range(70, 97-args.pts):
-                ser_sample = construct_feature(series_fea_j, day)
-                test_sample_list.append(ser_sample)
+                train_x, train_y, train_ys = construct_feature(series_fea_j, day)
+                train_x_list.append(train_x)
+                train_y_list.append(train_y)
+                train_ys_list.append(train_ys)
+            for day in range(70, 92-args.pts):
+                test_x, test_y, test_ys = construct_feature(series_fea_j, day)
+                test_x_list.append(test_x)
+                test_y_list.append(test_y)
+                test_ys_list.append(test_ys)
 
-        #train_data, test_data = TSDataset(train_sample_list), TSDataset(test_sample_list)
-        train_data, test_data = torch.LongTensor(train_sample_list), torch.LongTensor(test_sample_list)
+        train_x_list, train_y_list, test_x_list, test_y_list = np.array(train_x_list), np.array(train_y_list), np.array(test_x_list), np.array(test_y_list)
+        train_ys_list, test_ys_list = np.array(train_ys_list), np.array(test_ys_list)
+        train_data, test_data = TSADataset(train_x_list, train_y_list, train_ys_list), TSADataset(test_x_list, test_y_list, test_ys_list)
+
         if not os.path.isdir('task_data/'):
             os.makedirs('task_data/')
-        torch.save(train_data, 'task_data/train_dt.pt')
-        torch.save(test_data, 'task_data/test_dt.pt')
+        # torch.save(train_data, 'task_data/train_dt.pt')
+        # torch.save(test_data, 'task_data/test_dt.pt')
+        with open('task_data/train_dt.pkl', 'wb') as f:
+            pickle.dump(train_data, f)
+        with open('task_data/test_dt.pkl', 'wb') as f:
+            pickle.dump(test_data, f)
 
     print("[1] Start loading...")
-    train_data = torch.load('task_data/train_dt.pt')
-    test_data = torch.load('task_data/test_dt.pt')
+    # train_data = torch.load('task_data/train_dt.pt')
+    # test_data = torch.load('task_data/test_dt.pt')
+    # 加载数据集
+    with open('task_data/train_dt.pkl', 'rb') as f:
+        train_data = pickle.load(f)
+    with open('task_data/test_dt.pkl', 'rb') as f:
+        test_data = pickle.load(f)
     print("[2] Finish loading...")
 
     train_loader = DataLoader(train_data, batch_size=args.bs, shuffle=True)
@@ -331,13 +339,14 @@ def main():
         model.train()
         model.training = True
         total_loss = 0
-        for data in train_loader:
-            data = data.to(device)
+        for feature, label, sales in train_loader:
+            feature, label, sales = feature.to(device), label.to(device), sales.to(device)
             optimizer.zero_grad()
-            out = model(graph)
-            y_label = graph.y
-            class_loss = contrastive_loss(y_label, out)
-            loss = class_loss
+            out_sales, out_y, zI, zV = model(feature)
+            class_loss = contrastive_loss(label, out_y)
+            sales_loss = F.mse_loss(out_sales, sales)
+            dec_loss = decorrelate(zI, zV)
+            loss = class_loss + sales_loss*args.reg1 + dec_loss*args.reg2
             loss.backward()
             total_loss += loss.item()
             optimizer.step()
@@ -351,11 +360,11 @@ def main():
         true_inc_list = []
         pred_inc_list = []
         r1_list, r2_list, r3_list = [], [], []
-        for tgraph in test_loader:
-            tgraph = tgraph.to(device)
-            true_inc = tgraph.y.detach().cpu().numpy()
+        for tfeature, tlabel, tsales in test_loader:
+            tfeature, tlabel, tsales = tfeature.to(device), tlabel.to(device), tsales.to(device)
+            true_inc = tlabel.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
-            pred_inc= model(tgraph)
+            _, pred_inc, _, _ = model(tfeature)
             r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.95, dim=None, keepdim=False))
             r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.9, dim=None, keepdim=False))
             r3 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.8, dim=None, keepdim=False))
