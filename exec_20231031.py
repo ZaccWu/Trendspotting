@@ -130,7 +130,7 @@ class TRENDSPOT2(torch.nn.Module):
         self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels*2)
         self.linear_sales = nn.Linear(out_channels*2, 1)
         self.linear_trend = nn.Linear(out_channels, 1)
-        self.act = nn.ReLU()
+        self.act = nn.LeakyReLU()
 
     def forward(self, x):
         # input (x): (bs, fea_dim, K)
