@@ -27,10 +27,10 @@ parser = argparse.ArgumentParser('Trendspotting')
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
 parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_231031/')
-parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=True)
+parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
 
-parser.add_argument('--model', type=str, help='choose model', default='full1') # 'full', 'wo_ts', 'wo_g'
+parser.add_argument('--model', type=str, help='choose model', default='full') # 'full', 'wo_ts', 'wo_g'
 
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
@@ -329,7 +329,7 @@ def main():
     train_loader = DataLoader(train_data, batch_size=args.bs, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=args.bs, shuffle=False)
 
-    if args.model == 'full1':
+    if args.model == 'full':
         model = TRENDSPOT2(lag=args.K, fea_dim=fea_dim).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -391,7 +391,6 @@ def main():
         r2_ndcg = cal_ndcgK(np.nonzero(np.array(true_inc_list))[0], pred_r2.numpy())
         r3_ndcg = cal_ndcgK(np.nonzero(np.array(true_inc_list))[0], pred_r3.numpy())
 
-
         result['epoch'].append(epoch)
         result['r1_rec'].append(r1_rec)
         result['r2_rec'].append(r2_rec)
@@ -410,7 +409,7 @@ def main():
               'time {:3f}'.format(time.time() - t0))
 
     result = pd.DataFrame(result)
-    result.to_csv(args.result_path+args.model+'_eval_result.csv', index=False)
+    result.to_csv(args.result_path+args.model+'_result_reg_'+str(args.reg1)+'_'+str(args.reg2)+'.csv', index=False)
 
 if __name__ == '__main__':
     if not os.path.isdir(args.result_path):
