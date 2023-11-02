@@ -3,4 +3,5 @@ previous_version:
 
 exec_tgf：使用sample dv数据
 exec_20231023：多维时间序列+Variable Correlation Graph（+Ablation版本）
-exec_20231031：无需Construct Variable Correlation Graph
+exec_20231031：无需Construct Variable Correlation Graph，MSE-Auxiliary Invariant learning
+exec_20231101：Adaptive Variable Correlation Graph, MSE-Auxiliary Invariant learning
