@@ -28,7 +28,7 @@ parser = argparse.ArgumentParser('Trendspotting')
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
 parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_231101/')
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
-parser.add_argument('--online', type=bool, help='whether use online data', default=False)   # alibaba: True
+parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
 
 parser.add_argument('--model', type=str, help='choose model', default='full') # 'full', 'wo_ts', 'wo_g'
 
@@ -146,13 +146,13 @@ class TRENDSPOT2(torch.nn.Module):
             x1s = x1s.unsqueeze(0)
 
         g_emb = self.embedding(torch.LongTensor([i for i in range(self.fea_dim)]).to(device))  # fea_dim * hidden
-        EEt = torch.corrcoef(g_emb)  # (fea_dim * fea_dim)
-        A = torch.softmax(torch.relu(EEt), dim=1)   # weighted matrix (fea_dim * fea_dim)
+        #EEt = torch.corrcoef(g_emb)  # (fea_dim * fea_dim)
+        EEt = torch.mm(g_emb, g_emb.T)  # (fea_dim * fea_dim)
+        A = torch.softmax(torch.sigmoid(EEt), dim=1)   # weighted matrix (fea_dim * fea_dim)
         x_ls = torch.softmax(x[:,:,-1].squeeze(-1), dim=1) # (bs, fea_dim, K)->(bs, fea_dim)
         x_g = torch.mm(x_ls, A) # x_g: (bs, fea_dim)
         x_g = self.learn_w(x_g) # -> (bs, out_channels*2)
         x1s = x_g + x1s     # equal to skip-connection
-
 
         zI, zV = x1s[:,:self.z_dim], x1s[:,self.z_dim:]
         zV_star = zV[torch.randperm(zV.size(0))]
