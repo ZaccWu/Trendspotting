@@ -11,6 +11,8 @@ import argparse
 import torch.nn as nn
 import torch.nn.functional as F
 import pickle
+from torch.autograd import Function
+from typing import Any, Optional, Tuple
 
 # from torch_geometric.data import Data, Dataset
 # from torch_geometric.loader import DataLoader
@@ -27,7 +29,7 @@ parser = argparse.ArgumentParser('Trendspotting')
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
 parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_231108/')
-parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=True)
+parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
 
 parser.add_argument('--model', type=str, help='choose model', default='full') # 'full', 'wo_ts', 'wo_g'
@@ -42,6 +44,8 @@ parser.add_argument('--exp_th', type=float, help='explore threshold', default=2.
 # loss parameter
 parser.add_argument('--reg1', type=float, help='reg1', default=0.001)
 parser.add_argument('--reg2', type=float, help='reg2', default=0.01)
+parser.add_argument('--reg3', type=float, help='reg3', default=0.0001)
+parser.add_argument('--reg4', type=float, help='reg4', default=1)
 # # training parameter
 parser.add_argument('--seed', type=int, help='random seed', default=101)
 parser.add_argument('--gpu', type=int, help='idx for the gpu to use', default=0)
@@ -95,6 +99,22 @@ def read_data_to_dict(datafile, data_dict):
     return data_dict
 
 
+class GradientReverseFunction(Function):
+    @staticmethod
+    def forward(ctx: Any, input: torch.Tensor, coeff: Optional[float] = 1.) -> torch.Tensor:
+        ctx.coeff = coeff
+        output = input * 1.0
+        return output
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[torch.Tensor, Any]:
+        return grad_output.neg() * ctx.coeff, None
+
+class GRL_Layer(torch.nn.Module):
+    def __init__(self):
+        super(GRL_Layer, self).__init__()
+    def forward(self, *input):
+        return GradientReverseFunction.apply(*input)
+
 class time_att(nn.Module):
     def __init__(self, lag, n_hidden_1):
         super(time_att, self).__init__()
@@ -127,14 +147,24 @@ class TRENDSPOT2(torch.nn.Module):
         self.training = True
         self.fea_dim = fea_dim
         self.z_dim = out_channels
-
+        # affine transformation
         self.spv_aff = nn.Linear(self.fea_dim, self.fea_dim)
         self.tpv_aff = nn.Linear(self.fea_dim, self.fea_dim)
 
-        self.att_lstm_series = ATT_LSTM(lag, self.fea_dim*3, hid_dim, out_channels*2)
-        self.linear_sales = nn.Linear(out_channels*2, 1)
-        self.linear_trend = nn.Linear(out_channels, 1)
+        self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels*2)
+
+        self.att_lstm1 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.att_lstm2 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.att_lstm3 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.att_lstm4 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.view_cat = nn.Linear(out_channels*3, out_channels*2)
+        self.classifinet = nn.Sequential(nn.Linear(out_channels, 2))
+
+        self.linear_sales = nn.Linear(out_channels*4, 1)
+        self.linear_trend = nn.Linear(out_channels*2, 1)
         self.act = nn.LeakyReLU()
+
+        self.grl = GRL_Layer()
 
     def forward(self, x):
         # input (x): (bs, fea_dim, K)
@@ -142,18 +172,34 @@ class TRENDSPOT2(torch.nn.Module):
         series_spv = self.spv_aff(F.normalize(series_x, dim=2)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
         series_tpv = self.tpv_aff(F.normalize(series_x, dim=1)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
 
-        tsa_emb = self.att_lstm_series(torch.cat([series_x, series_spv, series_tpv], dim=-1))
-        # (bs, K, fea_dim) -> (bs, 1, hidden)
-        x1s = torch.squeeze(tsa_emb)  # x1s: (bs, hidden)
-        if len(x1s.shape)==1:
-            x1s = x1s.unsqueeze(0)
+        tsa_emb = self.att_lstm_series(series_x).squeeze(dim=1)
 
-        zI, zV = x1s[:,:self.z_dim], x1s[:,self.z_dim:]
+        spv_specific = self.att_lstm1(series_spv).squeeze(dim=1)   # (bs, K, fea_dim) -> (bs, 1, hidden) -> (bs, hidden)
+        spv_shared = self.att_lstm2(series_spv).squeeze(dim=1)
+        tpv_specific = self.att_lstm3(series_tpv).squeeze(dim=1)
+        tpv_shared = self.att_lstm4(series_tpv).squeeze(dim=1)
+
+        discri_shared = torch.cat([spv_shared, tpv_shared], dim=0) # (bs+bs, hidden) for GRL classification
+        # (bs, hidden) * (hidden, bs) -> (bs, bs) -> 1
+        orthogonal = torch.mm(spv_specific, spv_shared.T).sum() + torch.mm(tpv_specific, tpv_shared.T).sum()
+
+        allv_shared = (spv_shared + tpv_shared)/2   # (bs, hidden)
+        tsa_emb_norm = self.view_cat(torch.cat([spv_specific, tpv_specific, allv_shared], dim=-1)) # (bs, hidden*3) -> (bs, hidden*2)
+        view_prob = self.classifinet(self.grl(discri_shared)) # (bs+bs, hidden) -> (bs+bs, 2)
+
+        zI_emb, zV_emb = tsa_emb[:,:self.z_dim], tsa_emb[:,self.z_dim:]
+        zI_embn, zV_embn = tsa_emb_norm[:, :self.z_dim], tsa_emb_norm[:, self.z_dim:]
+        zI, zV = torch.cat([zI_emb, zI_embn], dim=-1), torch.cat([zV_emb, zV_embn], dim=-1)
+
         zV_star = zV[torch.randperm(zV.size(0))]
         x1s_star = torch.cat([zI, zV_star], dim=1)
         pred_sales = self.act(self.linear_sales(x1s_star))  # (bs, hidden) -> (bs,1)
         pred_trend = self.act(self.linear_trend(zV))
-        return pred_sales.squeeze(-1), pred_trend.squeeze(-1), zI, zV
+
+
+        return pred_sales.squeeze(-1), pred_trend.squeeze(-1), zI, zV, orthogonal, view_prob.squeeze(-1)
+
+
 
 class TSADataset(Dataset):
     def __init__(self, x_l, y_l, y_ls):
@@ -241,23 +287,7 @@ def construct_feature(series_fea_j, day):
         y = np.sum(y_head)/np.sum(y_past)
     y_inc = 0 if y<=args.exp_th else 1
     series_fea = series_fea_j[day-args.K:day,:].T # -> (fea_dim, K)
-
     return series_fea, y_inc, y_sales
-
-    # wA = 1-pairwise_distances(series_fea,metric='correlation') # [-1,1] means correlation
-    # wA = np.array(wA)
-    # wA = np.nan_to_num(wA, copy=False)
-    # wA_pos = wA.copy()
-    # wA[wA < args.gth_pos] = 0
-    # wA_pos[wA_pos < args.gth_pos] = 0
-    # wA_pos[wA_pos >= args.gth_pos] = 1
-    #
-    # A_pos = sp.coo_matrix(wA_pos - np.eye(len(wA_pos)))
-    # pos_edge_index = np.array([A_pos.row, A_pos.col]).T # (num_edges, 2)
-    # edge_weight_index = [wA[e[0], e[1]] for e in pos_edge_index]
-    # graph = Data(edge_index=torch.LongTensor(pos_edge_index).t().contiguous(),
-    #              edge_attr=torch.FloatTensor(edge_weight_index), x=torch.FloatTensor(series_fea), y=torch.tensor(y_inc), num_nodes=series_fea.shape[0])
-    # return graph
 
 
 def main():
@@ -350,11 +380,17 @@ def main():
         for feature, label, sales in train_loader:
             feature, label, sales = feature.to(device), label.to(device), sales.to(device)
             optimizer.zero_grad()
-            out_sales, out_y, zI, zV = model(feature)
+            out_sales, out_y, zI, zV, ortho_val, view_prob = model(feature)
+            target_viewlabel = torch.cat([torch.ones(len(label)), torch.zeros(len(label))], dim=-1)
+
             class_loss = contrastive_loss(label, out_y)
             sales_loss = F.mse_loss(out_sales, sales)
             dec_loss = decorrelate(zI, zV)
-            loss = class_loss + sales_loss*args.reg1 + dec_loss*args.reg2
+            orth_loss = ortho_val
+            view_loss = torch.nn.CrossEntropyLoss()(view_prob, target_viewlabel.long())
+            print(class_loss.item(), sales_loss.item()*args.reg1, dec_loss.item()*args.reg2, orth_loss.item()* args.reg3, view_loss.item() * args.reg4)
+
+            loss = class_loss + sales_loss*args.reg1 + dec_loss*args.reg2 + orth_loss * args.reg3 + view_loss * args.reg4
             loss.backward()
             total_loss += loss.item()
             optimizer.step()
@@ -372,7 +408,7 @@ def main():
             tfeature, tlabel, tsales = tfeature.to(device), tlabel.to(device), tsales.to(device)
             true_inc = tlabel.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
-            _, pred_inc, _, _ = model(tfeature)
+            _, pred_inc, _, _, _, _ = model(tfeature)
             r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.95, dim=None, keepdim=False))
             r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.9, dim=None, keepdim=False))
             r3 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.8, dim=None, keepdim=False))
@@ -417,7 +453,7 @@ def main():
               'time {:3f}'.format(time.time() - t0))
 
     result = pd.DataFrame(result)
-    result.to_csv(args.result_path+args.model+'_result_reg_'+str(args.reg1)+'_'+str(args.reg2)+'.csv', index=False)
+    result.to_csv(args.result_path+args.model+'_result_rA'+str(args.reg1)+'_rB'+str(args.reg2)+'_rC'+str(args.reg3)+'_rD'+str(args.reg4)+'.csv', index=False)
 
 if __name__ == '__main__':
     if not os.path.isdir(args.result_path):
