@@ -381,14 +381,14 @@ def main():
             feature, label, sales = feature.to(device), label.to(device), sales.to(device)
             optimizer.zero_grad()
             out_sales, out_y, zI, zV, ortho_val, view_prob = model(feature)
-            target_viewlabel = torch.cat([torch.ones(len(label)), torch.zeros(len(label))], dim=-1)
+            target_viewlabel = torch.cat([torch.ones(len(label)), torch.zeros(len(label))], dim=-1).to(device)
 
             class_loss = contrastive_loss(label, out_y)
             sales_loss = F.mse_loss(out_sales, sales)
             dec_loss = decorrelate(zI, zV)
             orth_loss = ortho_val
             view_loss = torch.nn.CrossEntropyLoss()(view_prob, target_viewlabel.long())
-            print(class_loss.item(), sales_loss.item()*args.reg1, dec_loss.item()*args.reg2, orth_loss.item()* args.reg3, view_loss.item() * args.reg4)
+            #print(class_loss.item(), sales_loss.item()*args.reg1, dec_loss.item()*args.reg2, orth_loss.item()* args.reg3, view_loss.item() * args.reg4)
 
             loss = class_loss + sales_loss*args.reg1 + dec_loss*args.reg2 + orth_loss * args.reg3 + view_loss * args.reg4
             loss.backward()
