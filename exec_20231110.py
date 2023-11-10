@@ -29,7 +29,7 @@ parser = argparse.ArgumentParser('Trendspotting')
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
 parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_231110/')
-parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
+parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=True)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
 
 parser.add_argument('--model', type=str, help='choose model', default='full') # 'full', 'wo_ts', 'wo_g'
@@ -42,16 +42,16 @@ parser.add_argument('--exp_th', type=float, help='explore threshold', default=2.
 # threshold in sample_dv (3 days): 3.33(top1%), 2.54(top2%), 2.21(top3%), 1.91(top5%), 1.56(top10%), 1.29(top20%)
 
 # loss parameter
-parser.add_argument('--reg1', type=float, help='reg1', default=0.0001)
-parser.add_argument('--reg2', type=float, help='reg2', default=0.01)
-parser.add_argument('--reg3', type=float, help='reg3', default=0.0001)
-parser.add_argument('--reg4', type=float, help='reg4', default=1)
+parser.add_argument('--reg1', type=float, help='reg1', default=0.0001)  # 1e-4
+parser.add_argument('--reg2', type=float, help='reg2', default=0.1)     # 0.1
+parser.add_argument('--reg3', type=float, help='reg3', default=0.0001)  # 1e-4
+parser.add_argument('--reg4', type=float, help='reg4', default=1)       # 1
 # # training parameter
 parser.add_argument('--seed', type=int, help='random seed', default=101)
 parser.add_argument('--gpu', type=int, help='idx for the gpu to use', default=0)
 parser.add_argument('--lr', type=float, help='learning rate', default=1e-4)
-parser.add_argument('--bs', type=int, help='batch size', default=1024)           # as large as possible
-parser.add_argument('--n_epoch', type=int, help='number of epochs', default=100) # 100
+parser.add_argument('--bs', type=int, help='batch size', default=32768)           # as large as possible
+parser.add_argument('--n_epoch', type=int, help='number of epochs', default=300) # 100
 
 
 try:
@@ -185,7 +185,8 @@ class TRENDSPOT2(torch.nn.Module):
 
         discri_shared = torch.cat([spv_shared, tpv_shared], dim=0) # (bs+bs, hidden) for GRL classification
         # (bs, hidden) * (hidden, bs) -> (bs, bs) -> 1
-        orthogonal = torch.mm(spv_specific, spv_shared.T).sum() + torch.mm(tpv_specific, tpv_shared.T).sum()
+        orthogonal = torch.abs(torch.mm(spv_specific, spv_shared.T).sum()) \
+                     + torch.abs(torch.mm(tpv_specific, tpv_shared.T).sum())
 
         allv_shared = (spv_shared + tpv_shared)/2   # (bs, hidden)
         tsa_emb_norm = self.view_cat(torch.cat([spv_specific, tpv_specific, allv_shared], dim=-1)) # (bs, hidden*3) -> (bs, hidden*2)
@@ -259,6 +260,8 @@ def cal_ndcgK(vcu, vru):
     return dcg/idcg
 
 def decorrelate(embI, embV):
+    # orthogonal = torch.abs(torch.mm(embI, embV.T).sum())
+    # return orthogonal
 	embI, embV = F.normalize(embI, dim=1), F.normalize(embV, dim=1)
 	orthogonal = torch.abs(torch.sum(torch.mul(embI, embV), dim=1))
 	return torch.sum(orthogonal)
@@ -404,15 +407,15 @@ def main():
             orth_loss = ortho_val
             view_loss = torch.nn.CrossEntropyLoss()(view_prob, target_viewlabel.long())
 
-            #print(class_loss.item(), sales_loss.item()*args.reg1, dec_loss.item()*args.reg2, orth_loss.item()* args.reg3, view_loss.item() * args.reg4)
+            print(class_loss.item(), sales_loss.item()*args.reg1, dec_loss.item()*args.reg2, orth_loss.item()* args.reg3, view_loss.item() * args.reg4)
 
             loss = class_loss + sales_loss*args.reg1 + dec_loss*args.reg2 + orth_loss * args.reg3 + view_loss * args.reg4
             loss.backward()
             total_loss += loss.item()
             optimizer.step()
         t1 = time.time()
-        print("training loss:", total_loss)
-        print("time of train epoch:", t1 - t0)
+        #print("training loss:", total_loss)
+        #print("time of train epoch:", t1 - t0)
 
         model.eval()
         model.training = False
@@ -460,11 +463,14 @@ def main():
         result['r3_ndcg'].append(r3_ndcg)
         result['AUC'].append(auc)
 
-        print("time of val epoch:", time.time() - t1)
+        #print("time of val epoch:", time.time() - t1)
         print('Epoch {:3d},'.format(epoch + 1),
-              'r1_rec {:3f},'.format(r1_rec),'r1_ndcg {:3f},'.format(r1_ndcg),
-              'r2_rec {:3f},'.format(r2_rec),'r2_ndcg {:3f},'.format(r2_ndcg),
-              'r3_rec {:3f},'.format(r3_rec),'r3_ndcg {:3f},'.format(r3_ndcg),
+              'r1_rec {:3f},'.format(r1_rec),
+              'r2_rec {:3f},'.format(r2_rec),
+              'r3_rec {:3f},'.format(r3_rec),
+              'r1_ndcg {:3f},'.format(r1_ndcg),
+              'r2_ndcg {:3f},'.format(r2_ndcg),
+              'r3_ndcg {:3f},'.format(r3_ndcg),
               'AUC {:3f},'.format(auc),
               'time {:3f}'.format(time.time() - t0))
 
