@@ -8,3 +8,4 @@ exec_20231101：Adaptive Variable Correlation Graph, MSE-Auxiliary Invariant lea
 Working的思路：
 exec_20231031：无需Construct Variable Correlation Graph，MSE-Auxiliary Invariant learning
 exec_20231108：20231031+Multi-view框架
+exec_20231213：20231213+Sales的结果帮助爆款预测

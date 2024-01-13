@@ -28,8 +28,8 @@ parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
-parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_231110/')
-parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=True)
+parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_240113_v4/')
+parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
 
 parser.add_argument('--model', type=str, help='choose model', default='full') # 'full', 'wo_ts', 'wo_g'
@@ -42,16 +42,16 @@ parser.add_argument('--exp_th', type=float, help='explore threshold', default=2.
 # threshold in sample_dv (3 days): 3.33(top1%), 2.54(top2%), 2.21(top3%), 1.91(top5%), 1.56(top10%), 1.29(top20%)
 
 # loss parameter
-parser.add_argument('--reg1', type=float, help='reg1', default=0.0001)  # 1e-4
+parser.add_argument('--reg1', type=float, help='reg1', default=1e-4)  # 1e-4
 parser.add_argument('--reg2', type=float, help='reg2', default=0.1)     # 0.1
-parser.add_argument('--reg3', type=float, help='reg3', default=0.0001)  # 1e-4
+parser.add_argument('--reg3', type=float, help='reg3', default=1e-5)  # 1e-4
 parser.add_argument('--reg4', type=float, help='reg4', default=1)       # 1
 # # training parameter
 parser.add_argument('--seed', type=int, help='random seed', default=101)
 parser.add_argument('--gpu', type=int, help='idx for the gpu to use', default=0)
 parser.add_argument('--lr', type=float, help='learning rate', default=1e-4)
-parser.add_argument('--bs', type=int, help='batch size', default=32768)           # as large as possible
-parser.add_argument('--n_epoch', type=int, help='number of epochs', default=300) # 100
+parser.add_argument('--bs', type=int, help='batch size', default=1024)           # as large as possible
+parser.add_argument('--n_epoch', type=int, help='number of epochs', default=100) # 100
 
 
 try:
@@ -133,7 +133,6 @@ class ATT_LSTM(nn.Module):
         self.LSTM = nn.LSTM(in_dim, n_hidden_1, 1, batch_first=True, bidirectional=False)
         self.time_att = time_att(lag, n_hidden_1)
         self.fc = nn.Sequential(nn.Linear(n_hidden_1, out_dim), nn.ReLU(True))
-
     def forward(self, x):
         ht, (hn, cn) = self.LSTM(x)
         t_att = self.time_att(ht).unsqueeze(dim=1)
@@ -141,33 +140,21 @@ class ATT_LSTM(nn.Module):
         att_ht = self.fc(att_ht)
         return att_ht
 
-class TRENDSPOT2(torch.nn.Module):
-    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
-        super(TRENDSPOT2, self).__init__()
-        self.training = True
-        self.fea_dim = fea_dim
-        self.z_dim = out_channels
+class MTView(nn.Module):
+    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32):
+        super(MTView, self).__init__()
         # affine transformation
+        self.fea_dim = fea_dim
         self.spv_aff = nn.Linear(self.fea_dim, self.fea_dim)
         self.tpv_aff = nn.Linear(self.fea_dim, self.fea_dim)
 
         self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels*2)
-
         self.att_lstm1 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
         self.att_lstm2 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
         self.att_lstm3 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
         self.att_lstm4 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
         self.view_cat = nn.Linear(out_channels*3, out_channels*2)
         self.classifinet = nn.Sequential(nn.Linear(out_channels, 2))
-
-        self.linear_sales1 = nn.Linear(out_channels * 4, 1)
-        self.linear_sales2 = nn.Linear(out_channels * 4, 1)
-        self.linear_sales3 = nn.Linear(out_channels * 4, 1)
-        self.linear_salesn = nn.Linear(out_channels * 4, 1)
-
-        self.linear_trend = nn.Linear(out_channels*2 + 4, 1)
-        self.act = nn.LeakyReLU()
-
         self.grl = GRL_Layer()
 
     def forward(self, x):
@@ -191,10 +178,34 @@ class TRENDSPOT2(torch.nn.Module):
         allv_shared = (spv_shared + tpv_shared)/2   # (bs, hidden)
         tsa_emb_norm = self.view_cat(torch.cat([spv_specific, tpv_specific, allv_shared], dim=-1)) # (bs, hidden*3) -> (bs, hidden*2)
         view_prob = self.classifinet(self.grl(discri_shared)) # (bs+bs, hidden) -> (bs+bs, 2)
+        return torch.cat([tsa_emb, tsa_emb_norm], dim=-1), orthogonal, view_prob
 
-        zI_emb, zV_emb = tsa_emb[:,:self.z_dim], tsa_emb[:,self.z_dim:]
-        zI_embn, zV_embn = tsa_emb_norm[:, :self.z_dim], tsa_emb_norm[:, self.z_dim:]
-        zI, zV = torch.cat([zI_emb, zI_embn], dim=-1), torch.cat([zV_emb, zV_embn], dim=-1)
+
+
+class TRENDSPOT2(torch.nn.Module):
+    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
+        super(TRENDSPOT2, self).__init__()
+        self.training = True
+        self.fea_dim = fea_dim
+        self.z_dim = out_channels
+
+        self.mt_view1 = MTView(lag, fea_dim, hid_dim, out_channels)
+        self.mt_view2 = MTView(lag, fea_dim, hid_dim, out_channels)
+
+        self.linear_sales1 = nn.Linear(out_channels * 8, 1)
+        self.linear_sales2 = nn.Linear(out_channels * 8, 1)
+        self.linear_sales3 = nn.Linear(out_channels * 8, 1)
+        self.linear_salesn = nn.Linear(out_channels * 8, 1)
+
+        self.linear_trend = nn.Linear(out_channels*4 + 4, 1)
+        #self.linear_trend = nn.Linear(out_channels * 2, 1)
+        self.act = nn.LeakyReLU()
+
+
+
+    def forward(self, x):
+        zI, orth_I, view_prob_I = self.mt_view1(x)
+        zV, orth_V, view_prob_V = self.mt_view2(x)
 
         zV_star = zV[torch.randperm(zV.size(0))]
         x1s_star = torch.cat([zI, zV_star], dim=1)
@@ -205,9 +216,11 @@ class TRENDSPOT2(torch.nn.Module):
 
         pred_trend = self.act(self.linear_trend(torch.cat([zV,pred_sales1,pred_sales2,pred_sales3,pred_salesn], dim=-1)))
 
-
+        view_prob = torch.cat([view_prob_I, view_prob_V], dim=0)
+        orthogonal = orth_I + orth_V
         return [pred_sales1.squeeze(-1), pred_sales2.squeeze(-1), pred_sales3.squeeze(-1), pred_salesn.squeeze(-1)],\
                pred_trend.squeeze(-1), zI, zV, orthogonal, view_prob.squeeze(-1)
+
 
 
 
@@ -387,7 +400,7 @@ def main():
         model = TRENDSPOT2(lag=args.K, fea_dim=fea_dim).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    result = {'epoch':[],'r1_rec':[],'r2_rec':[],'r3_rec':[],'r1_ndcg':[],'r2_ndcg':[],'r3_ndcg':[],'AUC':[],}
+    result = {'epoch':[],'r1_rec':[],'r2_rec':[],'r3_rec':[],'r1_ndcg':[],'r2_ndcg':[],'r3_ndcg':[],'AUC':[],'time':[]}
     for epoch in range(args.n_epoch):
         t0 = time.time()
         model.train()
@@ -395,19 +408,23 @@ def main():
         total_loss = 0
         for feature, label, sales in train_loader:
             feature, label, sales = feature.to(device), label.to(device), sales.to(device)
+
             optimizer.zero_grad()
             out_sales, out_y, zI, zV, ortho_val, view_prob = model(feature)
-            target_viewlabel = torch.cat([torch.ones(len(label)), torch.zeros(len(label))], dim=-1).to(device)
+            target_viewlabel = torch.cat([torch.ones(len(label)), torch.zeros(len(label)),
+                                          torch.ones(len(label)), torch.zeros(len(label))], dim=-1).to(device)
 
             class_loss = contrastive_loss(label, out_y)
-            sales_loss = F.mse_loss(out_sales[0], sales[:,0]) + F.mse_loss(out_sales[1], sales[:,1]) \
-                         + F.mse_loss(out_sales[2], sales[:,2]) + F.mse_loss(out_sales[3], sales[:,3])
+            _, yidx = out_y.topk(len(label)-len(label.nonzero()), largest=False)
+
+            sales_loss = F.mse_loss(out_sales[0][yidx], sales[:,0][yidx]) + F.mse_loss(out_sales[1][yidx], sales[:,1][yidx]) \
+                         + F.mse_loss(out_sales[2][yidx], sales[:,2][yidx]) + F.mse_loss(out_sales[3][yidx], sales[:,3][yidx])
 
             dec_loss = decorrelate(zI, zV)
             orth_loss = ortho_val
             view_loss = torch.nn.CrossEntropyLoss()(view_prob, target_viewlabel.long())
 
-            print(class_loss.item(), sales_loss.item()*args.reg1, dec_loss.item()*args.reg2, orth_loss.item()* args.reg3, view_loss.item() * args.reg4)
+            #print(class_loss.item(), sales_loss.item()*args.reg1, dec_loss.item()*args.reg2, orth_loss.item()* args.reg3, view_loss.item() * args.reg4)
 
             loss = class_loss + sales_loss*args.reg1 + dec_loss*args.reg2 + orth_loss * args.reg3 + view_loss * args.reg4
             loss.backward()
@@ -462,6 +479,7 @@ def main():
         result['r2_ndcg'].append(r2_ndcg)
         result['r3_ndcg'].append(r3_ndcg)
         result['AUC'].append(auc)
+        result['time'].append(time.time() - t0)
 
         #print("time of val epoch:", time.time() - t1)
         print('Epoch {:3d},'.format(epoch + 1),
