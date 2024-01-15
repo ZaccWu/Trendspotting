@@ -28,7 +28,7 @@ parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
-parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_240113_v4/')
+parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_240114/')
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
 
@@ -191,24 +191,28 @@ class TRENDSPOT2(torch.nn.Module):
 
         self.mt_view1 = MTView(lag, fea_dim, hid_dim, out_channels)
         self.mt_view2 = MTView(lag, fea_dim, hid_dim, out_channels)
+        self.mt_view_shared = MTView(lag, fea_dim, hid_dim, out_channels)
 
         self.linear_sales1 = nn.Linear(out_channels * 8, 1)
         self.linear_sales2 = nn.Linear(out_channels * 8, 1)
         self.linear_sales3 = nn.Linear(out_channels * 8, 1)
         self.linear_salesn = nn.Linear(out_channels * 8, 1)
 
-        self.linear_trend = nn.Linear(out_channels*4 + 4, 1)
+        self.linear_trend = nn.Linear(out_channels*8 + 4, 1)
         #self.linear_trend = nn.Linear(out_channels * 2, 1)
         self.act = nn.LeakyReLU()
 
 
 
     def forward(self, x):
-        zI, orth_I, view_prob_I = self.mt_view1(x)
-        zV, orth_V, view_prob_V = self.mt_view2(x)
+        zI_emb, orth_I, view_prob_I = self.mt_view1(x)
+        zV_emb, orth_V, view_prob_V = self.mt_view2(x)
+        zS_emb, orth_S, view_prob_S = self.mt_view2(x)
 
-        zV_star = zV[torch.randperm(zV.size(0))]
-        x1s_star = torch.cat([zI, zV_star], dim=1)
+        zI = torch.cat([zI_emb, zS_emb], dim=1)
+        zV = torch.cat([zV_emb, zS_emb], dim=1)
+        #zV_star = zV[torch.randperm(zV.size(0))]
+        x1s_star = torch.cat([zI], dim=1)
         pred_sales1 = self.act(self.linear_sales1(x1s_star))  # (bs, hidden) -> (bs,1)
         pred_sales2 = self.act(self.linear_sales1(x1s_star))
         pred_sales3 = self.act(self.linear_sales1(x1s_star))
@@ -216,10 +220,10 @@ class TRENDSPOT2(torch.nn.Module):
 
         pred_trend = self.act(self.linear_trend(torch.cat([zV,pred_sales1,pred_sales2,pred_sales3,pred_salesn], dim=-1)))
 
-        view_prob = torch.cat([view_prob_I, view_prob_V], dim=0)
-        orthogonal = orth_I + orth_V
+        view_prob = torch.cat([view_prob_I, view_prob_V, view_prob_S], dim=0)
+        orthogonal = orth_I + orth_V + orth_S
         return [pred_sales1.squeeze(-1), pred_sales2.squeeze(-1), pred_sales3.squeeze(-1), pred_salesn.squeeze(-1)],\
-               pred_trend.squeeze(-1), zI, zV, orthogonal, view_prob.squeeze(-1)
+               pred_trend.squeeze(-1), zI_emb, zV_emb, orthogonal, view_prob.squeeze(-1)
 
 
 
@@ -412,6 +416,7 @@ def main():
             optimizer.zero_grad()
             out_sales, out_y, zI, zV, ortho_val, view_prob = model(feature)
             target_viewlabel = torch.cat([torch.ones(len(label)), torch.zeros(len(label)),
+                                          torch.ones(len(label)), torch.zeros(len(label)),
                                           torch.ones(len(label)), torch.zeros(len(label))], dim=-1).to(device)
 
             class_loss = contrastive_loss(label, out_y)
