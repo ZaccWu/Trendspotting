@@ -32,7 +32,7 @@ parser.add_argument('--result_path', type=str, help='path of the result file', d
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
 
-parser.add_argument('--model', type=str, help='choose model', default='mvc') # 'lstm_att', 'lstm', 'gru', 'mva', 'mvc
+parser.add_argument('--model', type=str, help='choose model', default='evl') # 'lstm_att', 'lstm', 'gru', 'evl', 'mva', 'mvc
 
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
@@ -62,7 +62,7 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() else 'cpu')
-
+EPS = 1e-15
 # get the data
 def get_odps_data(table_txt):
     with open(table_txt, 'r', encoding='utf-8') as file:
@@ -261,6 +261,16 @@ def contrastive_loss(target, pred_score, m=5):
     loss = dev_score[(1-target).nonzero()].sum()+cont_score[target.nonzero()].sum()
     return loss
 
+def ev_loss(target, pred_score):  # 235032
+    # gamma=1.0 version
+    prop_0 = len((1-target).nonzero())  # label = 0
+    prop_1 = len(target.nonzero())      # label = 1
+    pred_score_sigmoid = torch.sigmoid(pred_score)
+    pos_loss = -torch.log(pred_score_sigmoid[target.nonzero()] + EPS).mean() * (prop_0/(prop_0+prop_1))
+    neg_loss = -torch.log(1 - pred_score_sigmoid[(1-target).nonzero()] + EPS).mean() * (prop_1/(prop_0+prop_1))
+    loss = pos_loss + neg_loss
+    return loss
+
 def transfer_pred(out, threshold):
     pred = out.clone()
     pred[torch.where(out < threshold)] = 0
@@ -415,7 +425,7 @@ def main():
         model = Lstm_Attention(lag=args.K, fea_dim=fea_dim).to(device)
     elif args.model == 'lstm':
         model = Lstm(lag=args.K, fea_dim=fea_dim).to(device)
-    elif args.model == 'gru':
+    elif args.model == 'gru' or 'evl':
         model = Gru(lag=args.K, fea_dim=fea_dim).to(device)
     elif args.model == 'mva':
         model = MTViewAve(lag=args.K, fea_dim=fea_dim).to(device)
@@ -435,7 +445,10 @@ def main():
 
             optimizer.zero_grad()
             out_y = model(feature)
-            class_loss = contrastive_loss(label, out_y)
+            if args.model == 'evl':
+                class_loss = ev_loss(label, out_y)
+            else:
+                class_loss = contrastive_loss(label, out_y)
             loss = class_loss
             loss.backward()
             total_loss += loss.item()
