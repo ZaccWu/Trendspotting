@@ -32,7 +32,7 @@ parser.add_argument('--result_path', type=str, help='path of the result file', d
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
 
-parser.add_argument('--model', type=str, help='choose model', default='lstm') # 'lstm_att', 'lstm
+parser.add_argument('--model', type=str, help='choose model', default='mvc') # 'lstm_att', 'lstm', 'gru', 'mva', 'mvc
 
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
@@ -94,7 +94,7 @@ def read_data_to_dict(datafile, data_dict):
     return data_dict
 
 
-
+# reusable module
 class ATT_LSTM(nn.Module):
     def __init__(self, lag, in_dim, n_hidden_1=32, out_dim=32):
         super(ATT_LSTM, self).__init__()
@@ -110,7 +110,7 @@ class ATT_LSTM(nn.Module):
         att_ht = self.fc(att_ht)
         return att_ht
 
-
+# possible architectures
 class Lstm_Attention(torch.nn.Module):
     def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
         super(Lstm_Attention, self).__init__()
@@ -129,7 +129,7 @@ class Lstm_Attention(torch.nn.Module):
 class Lstm(torch.nn.Module):
     def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
         super(Lstm, self).__init__()
-        self.LSTM = nn.LSTM(fea_dim, hid_dim, 1, batch_first=True, bidirectional=False)
+        self.LSTM = nn.LSTM(fea_dim, hid_dim, num_layers=2, batch_first=True, bidirectional=False)
         self.linear_trend = nn.Linear(out_channels, 1)
         self.act = nn.LeakyReLU()
     def forward(self, x):
@@ -137,6 +137,105 @@ class Lstm(torch.nn.Module):
         tsa_emb, (hn, cn) = self.LSTM(series_x) # -> (bs, K, hidden)
         pred_trend = self.act(self.linear_trend(tsa_emb[:,-1,:]).squeeze(dim=1))
         return pred_trend.squeeze(-1)
+
+class Gru(torch.nn.Module):
+    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
+        super(Gru, self).__init__()
+        self.GRU = nn.GRU(fea_dim, hid_dim, num_layers=2, batch_first=True, bidirectional=False)
+        self.linear_trend = nn.Linear(out_channels, 1)
+        self.act = nn.LeakyReLU()
+    def forward(self, x):
+        series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
+        tsa_emb, _ = self.GRU(series_x) # -> (bs, K, hidden)
+        pred_trend = self.act(self.linear_trend(tsa_emb[:,-1,:]).squeeze(dim=1))
+        return pred_trend.squeeze(-1)
+
+class MTViewAve(nn.Module): # 218012
+    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32):
+        super(MTViewAve, self).__init__()
+        self.att_lstm = ATT_LSTM(lag, fea_dim, hid_dim, out_channels)
+        self.LSTM = nn.LSTM(fea_dim, hid_dim, 2, batch_first=True, bidirectional=False)
+        self.LSTM_CNN = nn.LSTM(fea_dim, hid_dim, 1, batch_first=True, bidirectional=False)
+        self.CNN = nn.Sequential(
+            nn.Conv1d(hid_dim, hid_dim, kernel_size=3),
+            nn.MaxPool1d(kernel_size=2),
+            nn.Conv1d(hid_dim, out_channels, kernel_size=3),
+        )
+        self.linear_trend = nn.Linear(out_channels*3, 1)
+        self.act = nn.LeakyReLU()
+    def forward(self, x):
+        # input (x): (bs, fea_dim, K)
+        series_x = x.transpose(2, 1)  # (bs, fea_dim, K)->(bs, K, fea_dim)
+        tsa_emb1 = self.att_lstm(series_x).squeeze(dim=1) # (bs, K, fea_dim) -> (bs, 1, hidden) -> (bs, hidden)
+        emb_ave = torch.mean(tsa_emb1, dim=0, keepdim=True).repeat(tsa_emb1.shape[0],1) # (bs, hidden)
+        tsa_emb2, (hn, cn) = self.LSTM(series_x)  # -> (bs, K, hidden)
+        emb_lstm = tsa_emb2[:,-1,:]  # (bs, hidden)
+        tsa_emb3, (hn, cn) = self.LSTM_CNN(series_x)  # -> (bs, K, hidden)
+        emb_cnnpool = self.CNN(tsa_emb3.transpose(2, 1))[:,:,-1]   # input (bs, hidden, K) -> (bs, hidden)
+        emb_all = torch.cat([emb_ave, emb_lstm, emb_cnnpool], dim=-1)
+        pred_trend = self.act(self.linear_trend(emb_all))
+        return pred_trend.squeeze(-1)
+
+class MTViewCat(nn.Module): # 235045 (MTS)
+    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32):
+        super(MTViewCat, self).__init__()
+        # affine transformation
+        self.fea_dim = fea_dim
+        self.spv_aff = nn.Linear(self.fea_dim, self.fea_dim)
+        self.tpv_aff = nn.Linear(self.fea_dim, self.fea_dim)
+        self.att_lstm1 = nn.LSTM(fea_dim, hid_dim, 1, batch_first=True, bidirectional=False)
+        self.att_lstm2 = nn.LSTM(fea_dim, hid_dim, 1, batch_first=True, bidirectional=False)
+        self.att_lstm3 = nn.LSTM(fea_dim, hid_dim, 1, batch_first=True, bidirectional=False)
+        self.linear_trend = nn.Linear(out_channels*3, 1)
+        self.act = nn.LeakyReLU()
+    def forward(self, x):
+        # input (x): (bs, fea_dim, K)
+        series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
+        series_spv = self.spv_aff(F.normalize(series_x, dim=2)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
+        series_tpv = self.tpv_aff(F.normalize(series_x, dim=1)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
+        emb_spv, (hn, cn) = self.att_lstm1(series_spv) # -> (bs, K, hidden)
+        emb_tpv, (hn, cn) = self.att_lstm2(series_tpv)  # -> (bs, K, hidden)
+        emb_ori, (hn, cn) = self.att_lstm3(series_x)  # -> (bs, K, hidden)
+        emb_all = torch.cat([emb_spv[:,-1,:], emb_tpv[:,-1,:], emb_ori[:,-1,:]], dim=-1)
+        pred_trend = self.act(self.linear_trend(emb_all))
+        return pred_trend.squeeze(-1)
+
+class MTViewDD(nn.Module):
+    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32):
+        super(MTViewDD, self).__init__()
+        # affine transformation
+        self.fea_dim = fea_dim
+        self.spv_aff = nn.Linear(self.fea_dim, self.fea_dim)
+        self.tpv_aff = nn.Linear(self.fea_dim, self.fea_dim)
+        self.att_lstm1 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.att_lstm2 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.att_lstm3 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.att_lstm4 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.view_cat = nn.Linear(out_channels*3, out_channels*2)
+        self.classifinet = nn.Sequential(nn.Linear(out_channels, 2))
+        #self.grl = GRL_Layer()  ## TODO: GAN Implementation
+    def forward(self, x):
+        # input (x): (bs, fea_dim, K)
+        series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
+        series_spv = self.spv_aff(F.normalize(series_x, dim=2)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
+        series_tpv = self.tpv_aff(F.normalize(series_x, dim=1)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
+        spv_specific = self.att_lstm1(series_spv).squeeze(dim=1)   # (bs, K, fea_dim) -> (bs, 1, hidden) -> (bs, hidden)
+        spv_shared = self.att_lstm2(series_spv).squeeze(dim=1)
+        tpv_specific = self.att_lstm3(series_tpv).squeeze(dim=1)
+        tpv_shared = self.att_lstm4(series_tpv).squeeze(dim=1)
+        # multi-view learning
+        discri_shared = torch.cat([spv_shared, tpv_shared], dim=0) # (bs+bs, hidden) for GRL classification
+        # (bs, hidden) * (hidden, bs) -> (bs, bs) -> 1
+        orthogonal = torch.abs(torch.mm(spv_specific, spv_shared.T).sum()) \
+                     + torch.abs(torch.mm(tpv_specific, tpv_shared.T).sum())
+        allv_shared = (spv_shared + tpv_shared)/2   # (bs, hidden)
+        tsa_emb_norm = self.view_cat(torch.cat([spv_specific, tpv_specific, allv_shared], dim=-1)) # (bs, hidden*3) -> (bs, hidden*2)
+        view_prob = self.classifinet(self.grl(discri_shared)) # (bs+bs, hidden) -> (bs+bs, 2)
+        return tsa_emb_norm, orthogonal, view_prob
+
+
+
+
 
 
 
@@ -316,6 +415,13 @@ def main():
         model = Lstm_Attention(lag=args.K, fea_dim=fea_dim).to(device)
     elif args.model == 'lstm':
         model = Lstm(lag=args.K, fea_dim=fea_dim).to(device)
+    elif args.model == 'gru':
+        model = Gru(lag=args.K, fea_dim=fea_dim).to(device)
+    elif args.model == 'mva':
+        model = MTViewAve(lag=args.K, fea_dim=fea_dim).to(device)
+    elif args.model == 'mvc':
+        model = MTViewCat(lag=args.K, fea_dim=fea_dim).to(device)
+
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     result = {'epoch':[],'r1_rec':[],'r2_rec':[],'r3_rec':[],'r1_ndcg':[],'r2_ndcg':[],'r3_ndcg':[],'AUC':[],'time':[]}
