@@ -32,7 +32,7 @@ parser.add_argument('--result_path', type=str, help='path of the result file', d
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
 
-parser.add_argument('--model', type=str, help='choose model', default='evl') # 'lstm_att', 'lstm', 'gru', 'evl', 'mva', 'mvc
+parser.add_argument('--model', type=str, help='choose model', default='evl') # 'lstm_att', 'lstm', 'gru', 'evl', 'mva', 'mvc'
 
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
