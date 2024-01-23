@@ -29,10 +29,10 @@ parser = argparse.ArgumentParser('Trendspotting')
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
 parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_benchmark/')
-parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)
-parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True
+parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)  # fixed: False (=True only when constructing new data)
+parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True (used only when constructing new data)
 
-parser.add_argument('--model', type=str, help='choose model', default='evl') # 'lstm_att', 'lstm', 'gru', 'evl', 'mva', 'mvc'
+parser.add_argument('--model', type=str, help='choose model', default='lstm_att') # 'lstm_att', 'lstm', 'gru', 'evl', 'mva', 'mvc'
 
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
@@ -234,11 +234,6 @@ class MTViewDD(nn.Module):
         return tsa_emb_norm, orthogonal, view_prob
 
 
-
-
-
-
-
 class TSADataset(Dataset):
     def __init__(self, x_l, y_l, y_ls):
         super(TSADataset, self).__init__()
@@ -343,9 +338,9 @@ def construct_feature(series_fea_j, day):
     series_fea = series_fea_j[day-args.K:day,:].T # -> (fea_dim, K)
     return series_fea, y_inc, [y_sales1, y_sales2, y_sales3, y_salesn]
 
+def construct_train_test_sample(user_online_data):
 
-def main():
-    if args.online == True:
+    if user_online_data == True:
         # load data
         data_dict = read_data_to_dict(args.data_file, {})
         df = pd.DataFrame.from_dict(data_dict).T
@@ -355,7 +350,7 @@ def main():
         columns = df.columns
         # select variables in interest (y is the last)
         dv_col = ['content_id', 'visite_time', 'click_uv_1d', 'consume_uv_1d_valid', 'favor_uv_1d', 'comment_uv_1d',
-                  'share_uv_1d', 'collect_uv_1d', 'attention_uv_1d', 'lead_shop_uv_1d', 'cart_uv_1d', 'consume_uv_1d']
+                  'share_uv_1d', 'collect_uv_1d', 'attention_uv_1d', 'lead_shop_uv_1d', 'cart_uv_1d', 'consume_uv_1d'] # fea_dim = 10
         sample_content_dv = []
         start_time = time.time()
         st = 0
@@ -369,45 +364,47 @@ def main():
         end_time = time.time()
         print("Test running time: ", end_time - start_time)
         series = np.array(sample_content_dv)
-        fea_dim = len(dv_col)-2
 
     else:
         series = np.load('data/dv_count2.npy', allow_pickle=True)
-        fea_dim = series.shape[-1]-2
 
     print("[0] input shape: ", series.shape)
     num_content = series.shape[0]
     # construct training & test samples
+    train_x_list, test_x_list, train_y_list, test_y_list = [], [], [], []
+    train_ys_list, test_ys_list = [], []
+    for j in range(num_content):
+        y = series[j,:,:]
+        series_fea_j = y[np.argsort(y[:,1])][:,2:]  # (time_step, fea_dim), remove 'content_id', 'visite_time'
+        for day in range(args.K, 70):
+            train_x, train_y, train_ys = construct_feature(series_fea_j, day)
+            train_x_list.append(train_x)
+            train_y_list.append(train_y)
+            train_ys_list.append(train_ys)
+        for day in range(70, 92-args.pts):
+            test_x, test_y, test_ys = construct_feature(series_fea_j, day)
+            test_x_list.append(test_x)
+            test_y_list.append(test_y)
+            test_ys_list.append(test_ys)
+
+    train_x_list, train_y_list, test_x_list, test_y_list = np.array(train_x_list), np.array(train_y_list), np.array(test_x_list), np.array(test_y_list)
+    train_ys_list, test_ys_list = np.array(train_ys_list), np.array(test_ys_list)
+    train_data, test_data = TSADataset(train_x_list, train_y_list, train_ys_list), TSADataset(test_x_list, test_y_list, test_ys_list)
+
+    if not os.path.isdir('task_data/'):
+        os.makedirs('task_data/')
+    # torch.save(train_data, 'task_data/train_dt.pt')
+    # torch.save(test_data, 'task_data/test_dt.pt')
+    with open('task_data/train_dt.pkl', 'wb') as f:
+        pickle.dump(train_data, f)
+    with open('task_data/test_dt.pkl', 'wb') as f:
+        pickle.dump(test_data, f)
+
+def main():
     if args.gen_dt == True:
-        train_x_list, test_x_list, train_y_list, test_y_list = [], [], [], []
-        train_ys_list, test_ys_list = [], []
-        for j in range(num_content):
-            y = series[j,:,:]
-            series_fea_j = y[np.argsort(y[:,1])][:,2:]  # (time_step, fea_dim), remove 'content_id', 'visite_time'
-            for day in range(args.K, 70):
-                train_x, train_y, train_ys = construct_feature(series_fea_j, day)
-                train_x_list.append(train_x)
-                train_y_list.append(train_y)
-                train_ys_list.append(train_ys)
-            for day in range(70, 92-args.pts):
-                test_x, test_y, test_ys = construct_feature(series_fea_j, day)
-                test_x_list.append(test_x)
-                test_y_list.append(test_y)
-                test_ys_list.append(test_ys)
+        construct_train_test_sample(user_online_data=args.online)
 
-        train_x_list, train_y_list, test_x_list, test_y_list = np.array(train_x_list), np.array(train_y_list), np.array(test_x_list), np.array(test_y_list)
-        train_ys_list, test_ys_list = np.array(train_ys_list), np.array(test_ys_list)
-        train_data, test_data = TSADataset(train_x_list, train_y_list, train_ys_list), TSADataset(test_x_list, test_y_list, test_ys_list)
-
-        if not os.path.isdir('task_data/'):
-            os.makedirs('task_data/')
-        # torch.save(train_data, 'task_data/train_dt.pt')
-        # torch.save(test_data, 'task_data/test_dt.pt')
-        with open('task_data/train_dt.pkl', 'wb') as f:
-            pickle.dump(train_data, f)
-        with open('task_data/test_dt.pkl', 'wb') as f:
-            pickle.dump(test_data, f)
-
+    fea_dim = 10
     print("[1] Start loading...")
     # train_data = torch.load('task_data/train_dt.pt')
     # test_data = torch.load('task_data/test_dt.pt')
@@ -425,7 +422,7 @@ def main():
         model = Lstm_Attention(lag=args.K, fea_dim=fea_dim).to(device)
     elif args.model == 'lstm':
         model = Lstm(lag=args.K, fea_dim=fea_dim).to(device)
-    elif args.model == 'gru' or 'evl':
+    elif args.model in ['gru', 'evl']:
         model = Gru(lag=args.K, fea_dim=fea_dim).to(device)
     elif args.model == 'mva':
         model = MTViewAve(lag=args.K, fea_dim=fea_dim).to(device)
