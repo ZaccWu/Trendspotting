@@ -462,6 +462,7 @@ def main():
             elif args.model == 'wt_sales':
                 out_y, ortho_val, view_prob = model(feature, label)
                 target_viewlabel = torch.cat([torch.ones(len(label)), torch.zeros(len(label)),
+                                              torch.ones(len(label)), torch.zeros(len(label)),
                                               torch.ones(len(label)), torch.zeros(len(label))], dim=-1).to(device)
                 class_loss = contrastive_loss(label, out_y)
                 orth_loss = ortho_val
