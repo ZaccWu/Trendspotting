@@ -28,11 +28,11 @@ parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
-parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_240123/')
+parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_240123_v1/')
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)  # fixed: False (=True only when constructing new data)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True (used only when constructing new data)
 
-parser.add_argument('--model', type=str, help='choose model', default='wt_sales') # 'full', 'wt_sales'
+parser.add_argument('--model', type=str, help='choose model', default='wt_ov') # 'wt_tpv', 'wt_spv', 'wt_ov'
 
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
@@ -140,20 +140,63 @@ class ATT_LSTM(nn.Module):
         att_ht = self.fc(att_ht)
         return att_ht
 
-class MTView(nn.Module):
+class MTView_wtT(nn.Module):
     def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32):
-        super(MTView, self).__init__()
+        super(MTView_wtT, self).__init__()
+        # affine transformation
+        self.fea_dim = fea_dim
+        self.spv_aff = nn.Linear(self.fea_dim, self.fea_dim)
+
+        self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels*2)
+        self.att_lstm1 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.att_lstm2 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.view_cat = nn.Linear(out_channels*2, out_channels*2)
+
+    def forward(self, x):
+        # input (x): (bs, fea_dim, K)
+        series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
+        series_spv = self.spv_aff(F.normalize(series_x, dim=2)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
+        tsa_emb = self.att_lstm_series(series_x).squeeze(dim=1)
+        spv_specific = self.att_lstm1(series_spv).squeeze(dim=1)   # (bs, K, fea_dim) -> (bs, 1, hidden) -> (bs, hidden)
+        spv_shared = self.att_lstm2(series_spv).squeeze(dim=1)
+        tsa_emb_norm = self.view_cat(torch.cat([spv_specific, spv_shared], dim=-1)) # (bs, hidden*3) -> (bs, hidden*2)
+        return torch.cat([tsa_emb, tsa_emb_norm], dim=-1)
+
+class MTView_wtS(nn.Module):
+    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32):
+        super(MTView_wtS, self).__init__()
+        # affine transformation
+        self.fea_dim = fea_dim
+        self.tpv_aff = nn.Linear(self.fea_dim, self.fea_dim)
+
+        self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels*2)
+        self.att_lstm3 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.att_lstm4 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
+        self.view_cat = nn.Linear(out_channels*2, out_channels*2)
+
+    def forward(self, x):
+        # input (x): (bs, fea_dim, K)
+        series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
+        series_tpv = self.tpv_aff(F.normalize(series_x, dim=1)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
+        tsa_emb = self.att_lstm_series(series_x).squeeze(dim=1)
+        tpv_specific = self.att_lstm3(series_tpv).squeeze(dim=1)
+        tpv_shared = self.att_lstm4(series_tpv).squeeze(dim=1)
+        tsa_emb_norm = self.view_cat(torch.cat([tpv_specific, tpv_shared], dim=-1)) # (bs, hidden*3) -> (bs, hidden*2)
+        return torch.cat([tsa_emb, tsa_emb_norm], dim=-1)
+
+class MTView_wtO(nn.Module):
+    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32):
+        super(MTView_wtO, self).__init__()
         # affine transformation
         self.fea_dim = fea_dim
         self.spv_aff = nn.Linear(self.fea_dim, self.fea_dim)
         self.tpv_aff = nn.Linear(self.fea_dim, self.fea_dim)
 
-        self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels*2)
         self.att_lstm1 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
         self.att_lstm2 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
         self.att_lstm3 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
         self.att_lstm4 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
-        self.view_cat = nn.Linear(out_channels*3, out_channels*2)
+        self.view_cat = nn.Linear(out_channels*3, out_channels*4)
         self.classifinet = nn.Sequential(nn.Linear(out_channels, 2))
         self.grl = GRL_Layer()
 
@@ -162,8 +205,6 @@ class MTView(nn.Module):
         series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
         series_spv = self.spv_aff(F.normalize(series_x, dim=2)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
         series_tpv = self.tpv_aff(F.normalize(series_x, dim=1)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
-
-        tsa_emb = self.att_lstm_series(series_x).squeeze(dim=1)
 
         spv_specific = self.att_lstm1(series_spv).squeeze(dim=1)   # (bs, K, fea_dim) -> (bs, 1, hidden) -> (bs, hidden)
         spv_shared = self.att_lstm2(series_spv).squeeze(dim=1)
@@ -178,8 +219,7 @@ class MTView(nn.Module):
         allv_shared = (spv_shared + tpv_shared)/2   # (bs, hidden)
         tsa_emb_norm = self.view_cat(torch.cat([spv_specific, tpv_specific, allv_shared], dim=-1)) # (bs, hidden*3) -> (bs, hidden*2)
         view_prob = self.classifinet(self.grl(discri_shared)) # (bs+bs, hidden) -> (bs+bs, 2)
-        return torch.cat([tsa_emb, tsa_emb_norm], dim=-1), orthogonal, view_prob
-
+        return torch.cat([tsa_emb_norm], dim=-1), orthogonal, view_prob
 
 
 class TRENDSPOT2(torch.nn.Module):
@@ -187,9 +227,18 @@ class TRENDSPOT2(torch.nn.Module):
         super(TRENDSPOT2, self).__init__()
         self.training = True
         self.fea_dim, self.z_dim = fea_dim, out_channels
-        self.mt_view1 = MTView(lag, fea_dim, hid_dim, out_channels)
-        self.mt_view2 = MTView(lag, fea_dim, hid_dim, out_channels)
-        self.mt_view_shared = MTView(lag, fea_dim, hid_dim, out_channels)
+        if args.model == 'wt_tpv':
+            self.mt_view1 = MTView_wtT(lag, fea_dim, hid_dim, out_channels)
+            self.mt_view2 = MTView_wtT(lag, fea_dim, hid_dim, out_channels)
+            self.mt_view_shared = MTView_wtT(lag, fea_dim, hid_dim, out_channels)
+        elif args.model == 'wt_spv':
+            self.mt_view1 = MTView_wtS(lag, fea_dim, hid_dim, out_channels)
+            self.mt_view2 = MTView_wtS(lag, fea_dim, hid_dim, out_channels)
+            self.mt_view_shared = MTView_wtS(lag, fea_dim, hid_dim, out_channels)
+        elif args.model == 'wt_ov':
+            self.mt_view1 = MTView_wtO(lag, fea_dim, hid_dim, out_channels)
+            self.mt_view2 = MTView_wtO(lag, fea_dim, hid_dim, out_channels)
+            self.mt_view_shared = MTView_wtO(lag, fea_dim, hid_dim, out_channels)
 
         self.linear_sales1 = nn.Linear(out_channels * 8, 1)
         self.linear_sales2 = nn.Linear(out_channels * 8, 1)
@@ -201,9 +250,12 @@ class TRENDSPOT2(torch.nn.Module):
         self.grl = GRL_Layer()
 
     def forward(self, x, label):
-        zI_emb, orth_I, view_prob_I = self.mt_view1(x)
-        zV_emb, orth_V, view_prob_V = self.mt_view2(x)
-        zS_emb, orth_S, view_prob_S = self.mt_view_shared(x)
+        if args.model in ['wt_tpv','wt_spv']:
+            zI_emb, zV_emb, zS_emb = self.mt_view1(x), self.mt_view2(x), self.mt_view_shared(x)
+        elif args.model == 'wt_ov':
+            zI_emb, orth_I, view_prob_I = self.mt_view1(x)
+            zV_emb, orth_V, view_prob_V = self.mt_view2(x)
+            zS_emb, orth_S, view_prob_S = self.mt_view_shared(x)
 
         zI, zV = torch.cat([zI_emb, zS_emb], dim=1), torch.cat([zV_emb, zS_emb], dim=1)
         pred_trend = self.act(self.linear_trend(zV))
@@ -222,39 +274,18 @@ class TRENDSPOT2(torch.nn.Module):
         ps3_1 = self.act(self.linear_sales3(self.grl(zI[yid1])))
         psn_1 = self.act(self.linear_salesn(self.grl(zI[yid1])))
 
-        view_prob = torch.cat([view_prob_I, view_prob_V, view_prob_S], dim=0)
-        orthogonal = orth_I + orth_V + orth_S
+        if args.model in ['wt_tpv', 'wt_spv']:
+            return [ps1.squeeze(-1),ps2.squeeze(-1),ps3.squeeze(-1),psn.squeeze(-1)],\
+                   [ps1_1.squeeze(-1),ps2_1.squeeze(-1),ps3_1.squeeze(-1),psn_1.squeeze(-1)],\
+                   [yid0, yid1], pred_trend, zI_emb, zV_emb
 
-        return [ps1.squeeze(-1),ps2.squeeze(-1),ps3.squeeze(-1),psn.squeeze(-1)],\
-               [ps1_1.squeeze(-1),ps2_1.squeeze(-1),ps3_1.squeeze(-1),psn_1.squeeze(-1)],\
-               [yid0, yid1], pred_trend, zI_emb, zV_emb, orthogonal, view_prob.squeeze(-1)
+        elif args.model == 'wt_ov':
+            view_prob = torch.cat([view_prob_I, view_prob_V, view_prob_S], dim=0)
+            orthogonal = orth_I + orth_V + orth_S
 
-class WT_SALES(torch.nn.Module):
-    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
-        super(WT_SALES, self).__init__()
-        self.training = True
-        self.fea_dim, self.z_dim = fea_dim, out_channels
-        self.mt_view1 = MTView(lag, fea_dim, hid_dim, out_channels)
-        self.mt_view2 = MTView(lag, fea_dim, hid_dim, out_channels)
-        self.mt_view_shared = MTView(lag, fea_dim, hid_dim, out_channels)
-
-        self.linear_trend = nn.Linear(out_channels*8, 1)
-        self.act = nn.LeakyReLU()
-
-    def forward(self, x, label):
-        zI_emb, orth_I, view_prob_I = self.mt_view1(x)
-        zV_emb, orth_V, view_prob_V = self.mt_view2(x)
-        zS_emb, orth_S, view_prob_S = self.mt_view_shared(x)
-
-        zI, zV = torch.cat([zI_emb, zS_emb], dim=1), torch.cat([zV_emb, zS_emb], dim=1)
-        pred_trend = self.act(self.linear_trend(zV))
-        pred_trend = pred_trend.squeeze(-1)
-
-        view_prob = torch.cat([view_prob_I, view_prob_V, view_prob_S], dim=0)
-        orthogonal = orth_I + orth_V + orth_S
-
-        return pred_trend, orthogonal, view_prob.squeeze(-1)
-
+            return [ps1.squeeze(-1),ps2.squeeze(-1),ps3.squeeze(-1),psn.squeeze(-1)],\
+                   [ps1_1.squeeze(-1),ps2_1.squeeze(-1),ps3_1.squeeze(-1),psn_1.squeeze(-1)],\
+                   [yid0, yid1], pred_trend, zI_emb, zV_emb, orthogonal, view_prob.squeeze(-1)
 
 class TSADataset(Dataset):
     def __init__(self, x_l, y_l, y_ls):
@@ -428,10 +459,7 @@ def main():
     train_loader = DataLoader(train_data, batch_size=args.bs, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=args.bs, shuffle=False)
 
-    if args.model == 'full':
-        model = TRENDSPOT2(lag=args.K, fea_dim=fea_dim).to(device)
-    elif args.model == 'wt_sales':
-        model = WT_SALES(lag=args.K, fea_dim=fea_dim).to(device)
+    model = TRENDSPOT2(lag=args.K, fea_dim=fea_dim).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     result = {'epoch':[],'r1_rec':[],'r2_rec':[],'r3_rec':[],'r1_ndcg':[],'r2_ndcg':[],'r3_ndcg':[],'AUC':[],'time':[]}
@@ -443,30 +471,29 @@ def main():
         for feature, label, sales in train_loader:
             feature, label, sales = feature.to(device), label.to(device), sales.to(device)
             optimizer.zero_grad()
-
-            if args.model == 'full':
-                out_sales, out_sales1, [yid0, yid1], out_y, zI, zV, ortho_val, view_prob = model(feature, label)
-                target_viewlabel = torch.cat([torch.ones(len(label)), torch.zeros(len(label)),
-                                              torch.ones(len(label)), torch.zeros(len(label)),
-                                              torch.ones(len(label)), torch.zeros(len(label))], dim=-1).to(device)
+            if args.model in ['wt_tpv', 'wt_spv']:
+                out_sales, out_sales1, [yid0, yid1], out_y, zI, zV = model(feature, label)
                 class_loss = contrastive_loss(label, out_y)
                 sales_loss = F.mse_loss(out_sales[0], sales[:,0][yid0]) + F.mse_loss(out_sales[1], sales[:,1][yid0]) \
                              + F.mse_loss(out_sales[2], sales[:,2][yid0]) + F.mse_loss(out_sales[3], sales[:,3][yid0]) \
                             + F.mse_loss(out_sales1[0], sales[:, 0][yid1]) + F.mse_loss(out_sales1[1], sales[:, 1][yid1]) \
                             + F.mse_loss(out_sales1[2], sales[:, 2][yid1]) + F.mse_loss(out_sales1[3], sales[:, 3][yid1])
                 dec_loss = decorrelate(zI, zV)
-                orth_loss = ortho_val
-                view_loss = torch.nn.CrossEntropyLoss()(view_prob, target_viewlabel.long())
-                loss = class_loss + sales_loss*args.reg1 + dec_loss*args.reg2 + orth_loss * args.reg3 + view_loss * args.reg4
-
-            elif args.model == 'wt_sales':
-                out_y, ortho_val, view_prob = model(feature, label)
+                loss = class_loss + sales_loss*args.reg1 + dec_loss*args.reg2
+            elif args.model == 'wt_ov':
+                out_sales, out_sales1, [yid0, yid1], out_y, zI, zV, ortho_val, view_prob = model(feature, label)
                 target_viewlabel = torch.cat([torch.ones(len(label)), torch.zeros(len(label)),
+                                              torch.ones(len(label)), torch.zeros(len(label)),
                                               torch.ones(len(label)), torch.zeros(len(label))], dim=-1).to(device)
                 class_loss = contrastive_loss(label, out_y)
+                sales_loss = F.mse_loss(out_sales[0], sales[:, 0][yid0]) + F.mse_loss(out_sales[1], sales[:, 1][yid0]) \
+                             + F.mse_loss(out_sales[2], sales[:, 2][yid0]) + F.mse_loss(out_sales[3], sales[:, 3][yid0]) \
+                             + F.mse_loss(out_sales1[0], sales[:, 0][yid1]) + F.mse_loss(out_sales1[1], sales[:, 1][yid1]) \
+                             + F.mse_loss(out_sales1[2], sales[:, 2][yid1]) + F.mse_loss(out_sales1[3], sales[:, 3][yid1])
+                dec_loss = decorrelate(zI, zV)
                 orth_loss = ortho_val
                 view_loss = torch.nn.CrossEntropyLoss()(view_prob, target_viewlabel.long())
-                loss = class_loss + orth_loss * args.reg3 + view_loss * args.reg4
+                loss = class_loss + sales_loss * args.reg1 + dec_loss * args.reg2 + orth_loss * args.reg3 + view_loss * args.reg4
 
             loss.backward()
             total_loss += loss.item()
@@ -485,10 +512,10 @@ def main():
             tfeature, tlabel, tsales = tfeature.to(device), tlabel.to(device), tsales.to(device)
             true_inc = tlabel.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
-            if args.model == 'full':
+            if args.model in ['wt_tpv', 'wt_spv']:
+                _, _, _, pred_inc, _, _ = model(tfeature, tlabel)
+            elif args.model == 'wt_ov':
                 _, _, _, pred_inc, _, _, _, _ = model(tfeature, tlabel)
-            elif args.model == 'wt_sales':
-                pred_inc, _, _ = model(tfeature, tlabel)
 
             r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.95, dim=None, keepdim=False))
             r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.9, dim=None, keepdim=False))
