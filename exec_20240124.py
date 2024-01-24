@@ -28,11 +28,11 @@ parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
 # parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
-parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_240123/')
+parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_240124/')
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)  # fixed: False (=True only when constructing new data)
 parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True (used only when constructing new data)
 
-parser.add_argument('--model', type=str, help='choose model', default='wt_sales') # 'full', 'wt_sales'
+parser.add_argument('--model', type=str, help='choose model', default='m2') # m1(full), m2(wt_sales)
 
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
@@ -428,9 +428,9 @@ def main():
     train_loader = DataLoader(train_data, batch_size=args.bs, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=args.bs, shuffle=False)
 
-    if args.model == 'full':
+    if args.model == 'm1':
         model = TRENDSPOT2(lag=args.K, fea_dim=fea_dim).to(device)
-    elif args.model == 'wt_sales':
+    elif args.model == 'm2':
         model = WT_SALES(lag=args.K, fea_dim=fea_dim).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -444,7 +444,7 @@ def main():
             feature, label, sales = feature.to(device), label.to(device), sales.to(device)
             optimizer.zero_grad()
 
-            if args.model == 'full':
+            if args.model == 'm1':
                 out_sales, out_sales1, [yid0, yid1], out_y, zI, zV, ortho_val, view_prob = model(feature, label)
                 target_viewlabel = torch.cat([torch.ones(len(label)), torch.zeros(len(label)),
                                               torch.ones(len(label)), torch.zeros(len(label)),
@@ -459,7 +459,7 @@ def main():
                 view_loss = torch.nn.CrossEntropyLoss()(view_prob, target_viewlabel.long())
                 loss = class_loss + sales_loss*args.reg1 + dec_loss*args.reg2 + orth_loss * args.reg3 + view_loss * args.reg4
 
-            elif args.model == 'wt_sales':
+            elif args.model == 'm2':
                 out_y, ortho_val, view_prob = model(feature, label)
                 target_viewlabel = torch.cat([torch.ones(len(label)), torch.zeros(len(label)),
                                               torch.ones(len(label)), torch.zeros(len(label)),
@@ -486,9 +486,9 @@ def main():
             tfeature, tlabel, tsales = tfeature.to(device), tlabel.to(device), tsales.to(device)
             true_inc = tlabel.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
-            if args.model == 'full':
+            if args.model == 'm1':
                 _, _, _, pred_inc, _, _, _, _ = model(tfeature, tlabel)
-            elif args.model == 'wt_sales':
+            elif args.model == 'm2':
                 pred_inc, _, _ = model(tfeature, tlabel)
 
             r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.95, dim=None, keepdim=False))
