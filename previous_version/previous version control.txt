@@ -1,8 +1,15 @@
 previous_version:
+version 1. 
 * exec_c，exec_ct：使用user共点击构建product weighted graph
 
+version 2.
 exec_tgf：使用sample dv数据
 exec_20231023：多维时间序列+Variable Correlation Graph（+Ablation版本）
 exec_20231031：无需Construct Variable Correlation Graph，MSE-Auxiliary Invariant learning
 exec_20231101：Adaptive Variable Correlation Graph, MSE-Auxiliary Invariant learning
 exec_20231108：20231031+Multi-view框架
+
+version 3.
+exec_20231213：20231213+Sales的结果帮助爆款预测
+exec_20240114：预测sales和预测爆款是分离架构
+exec_20240124：预测中加入grl设置，pred sales更不利于爆款，而有利于非爆款

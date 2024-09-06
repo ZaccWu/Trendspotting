@@ -1,7 +1,1 @@
-previous_version:
-* exec_c，exec_ct：使用user共点击构建product weighted graph
-
-搁置的思路：
-exec_20231213：20231213+Sales的结果帮助爆款预测
-exec_20240114：预测sales和预测爆款是分离架构
-exec_20240123：预测中加入grl设置，pred sales更不利于爆款，而有利于非爆款
+previous_version: Using ali online data

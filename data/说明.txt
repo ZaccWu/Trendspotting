@@ -2,3 +2,4 @@ dv_count.npy: (39601, 97, 5)
 39601条
 97天
 五个维度：'content_id','visite_time','expo_uv_1d','click_uv_1d','consume_uv_1d'
+dv_count2.npy: (9916, 92, 12)
