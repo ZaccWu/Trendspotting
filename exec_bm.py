@@ -26,13 +26,11 @@ from sklearn.metrics.pairwise import pairwise_distances
 
 parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
-# parser.add_argument('--tau', type=int, help='tau-day-ahead prediction', default=1)
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
 parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_benchmark/')
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)  # fixed: False (=True only when constructing new data)
-parser.add_argument('--online', type=bool, help='whether use online data', default=True)   # alibaba: True (used only when constructing new data)
-
-parser.add_argument('--model', type=str, help='choose model', default='lstm_att') # 'lstm_att', 'lstm', 'gru', 'evl', 'mva', 'mvc'
+parser.add_argument('--model', type=str, help='choose model', default='lstm_att') # 'lstm_att', 'lstm', 'gru'
+parser.add_argument('--train_loss', type=str, help='choose model', default='contrast') # 'contrast', 'evl'
 
 # # data parameter
 parser.add_argument('--K', type=int, help='look-back window size', default=30)
@@ -42,7 +40,6 @@ parser.add_argument('--exp_th', type=float, help='explore threshold', default=2.
 # threshold in sample_dv (3 days): 3.33(top1%), 2.54(top2%), 2.21(top3%), 1.91(top5%), 1.56(top10%), 1.29(top20%)
 
 # # training parameter
-parser.add_argument('--seed', type=int, help='random seed', default=101)
 parser.add_argument('--gpu', type=int, help='idx for the gpu to use', default=0)
 parser.add_argument('--lr', type=float, help='learning rate', default=1e-4)
 parser.add_argument('--bs', type=int, help='batch size', default=1024)           # as large as possible
@@ -55,43 +52,16 @@ except:
     parser.print_help()
     sys.exit(0)
 
-random.seed(args.seed)
-np.random.seed(args.seed)
-torch.manual_seed(args.seed)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
 device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() else 'cpu')
 EPS = 1e-15
-# get the data
-def get_odps_data(table_txt):
-    with open(table_txt, 'r', encoding='utf-8') as file:
-        data = file.read()
-    return data
 
-def read_data_to_dict(datafile, data_dict):
-    data = get_odps_data(datafile)
-    head = data.split('\n')[0].split('||$||')
-    data = data.split('||$||')
-    item_len = len(head) - 1
-    for i in range(1, int(len(data) // item_len) - 1):
-        rowdata = data[i * item_len:(i + 1) * item_len + 1]
-        rowdata[0] = rowdata[0].split('\n')[1]
-        rowdata[-1] = rowdata[-1].split('\n')[0]
-        item = collections.OrderedDict(list(zip(head, rowdata)))
-        data_dict[i] = item
-
-        try:
-            a = int(item['content_id'])
-        except Exception as e:
-            print(e)
-            print(i, item)
-        if 'content_id' not in item:
-            print(i, item)
-        if i % 10000 == 0:
-            print('finish {}'.format(i))
-            print(data_dict[i])
-    return data_dict
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
 
 # reusable module
@@ -150,101 +120,16 @@ class Gru(torch.nn.Module):
         pred_trend = self.act(self.linear_trend(tsa_emb[:,-1,:]).squeeze(dim=1))
         return pred_trend.squeeze(-1)
 
-class MTViewAve(nn.Module): # 218012
-    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32):
-        super(MTViewAve, self).__init__()
-        self.att_lstm = ATT_LSTM(lag, fea_dim, hid_dim, out_channels)
-        self.LSTM = nn.LSTM(fea_dim, hid_dim, 2, batch_first=True, bidirectional=False)
-        self.LSTM_CNN = nn.LSTM(fea_dim, hid_dim, 1, batch_first=True, bidirectional=False)
-        self.CNN = nn.Sequential(
-            nn.Conv1d(hid_dim, hid_dim, kernel_size=3),
-            nn.MaxPool1d(kernel_size=2),
-            nn.Conv1d(hid_dim, out_channels, kernel_size=3),
-        )
-        self.linear_trend = nn.Linear(out_channels*3, 1)
-        self.act = nn.LeakyReLU()
-    def forward(self, x):
-        # input (x): (bs, fea_dim, K)
-        series_x = x.transpose(2, 1)  # (bs, fea_dim, K)->(bs, K, fea_dim)
-        tsa_emb1 = self.att_lstm(series_x).squeeze(dim=1) # (bs, K, fea_dim) -> (bs, 1, hidden) -> (bs, hidden)
-        emb_ave = torch.mean(tsa_emb1, dim=0, keepdim=True).repeat(tsa_emb1.shape[0],1) # (bs, hidden)
-        tsa_emb2, (hn, cn) = self.LSTM(series_x)  # -> (bs, K, hidden)
-        emb_lstm = tsa_emb2[:,-1,:]  # (bs, hidden)
-        tsa_emb3, (hn, cn) = self.LSTM_CNN(series_x)  # -> (bs, K, hidden)
-        emb_cnnpool = self.CNN(tsa_emb3.transpose(2, 1))[:,:,-1]   # input (bs, hidden, K) -> (bs, hidden)
-        emb_all = torch.cat([emb_ave, emb_lstm, emb_cnnpool], dim=-1)
-        pred_trend = self.act(self.linear_trend(emb_all))
-        return pred_trend.squeeze(-1)
-
-class MTViewCat(nn.Module): # 235045 (MTS)
-    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32):
-        super(MTViewCat, self).__init__()
-        # affine transformation
-        self.fea_dim = fea_dim
-        self.spv_aff = nn.Linear(self.fea_dim, self.fea_dim)
-        self.tpv_aff = nn.Linear(self.fea_dim, self.fea_dim)
-        self.att_lstm1 = nn.LSTM(fea_dim, hid_dim, 1, batch_first=True, bidirectional=False)
-        self.att_lstm2 = nn.LSTM(fea_dim, hid_dim, 1, batch_first=True, bidirectional=False)
-        self.att_lstm3 = nn.LSTM(fea_dim, hid_dim, 1, batch_first=True, bidirectional=False)
-        self.linear_trend = nn.Linear(out_channels*3, 1)
-        self.act = nn.LeakyReLU()
-    def forward(self, x):
-        # input (x): (bs, fea_dim, K)
-        series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
-        series_spv = self.spv_aff(F.normalize(series_x, dim=2)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
-        series_tpv = self.tpv_aff(F.normalize(series_x, dim=1)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
-        emb_spv, (hn, cn) = self.att_lstm1(series_spv) # -> (bs, K, hidden)
-        emb_tpv, (hn, cn) = self.att_lstm2(series_tpv)  # -> (bs, K, hidden)
-        emb_ori, (hn, cn) = self.att_lstm3(series_x)  # -> (bs, K, hidden)
-        emb_all = torch.cat([emb_spv[:,-1,:], emb_tpv[:,-1,:], emb_ori[:,-1,:]], dim=-1)
-        pred_trend = self.act(self.linear_trend(emb_all))
-        return pred_trend.squeeze(-1)
-
-class MTViewDD(nn.Module):
-    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32):
-        super(MTViewDD, self).__init__()
-        # affine transformation
-        self.fea_dim = fea_dim
-        self.spv_aff = nn.Linear(self.fea_dim, self.fea_dim)
-        self.tpv_aff = nn.Linear(self.fea_dim, self.fea_dim)
-        self.att_lstm1 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
-        self.att_lstm2 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
-        self.att_lstm3 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
-        self.att_lstm4 = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
-        self.view_cat = nn.Linear(out_channels*3, out_channels*2)
-        self.classifinet = nn.Sequential(nn.Linear(out_channels, 2))
-        #self.grl = GRL_Layer()  ## TODO: GAN Implementation
-    def forward(self, x):
-        # input (x): (bs, fea_dim, K)
-        series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
-        series_spv = self.spv_aff(F.normalize(series_x, dim=2)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
-        series_tpv = self.tpv_aff(F.normalize(series_x, dim=1)) # (bs, K, fea_dim) -> (bs, K, fea_dim')
-        spv_specific = self.att_lstm1(series_spv).squeeze(dim=1)   # (bs, K, fea_dim) -> (bs, 1, hidden) -> (bs, hidden)
-        spv_shared = self.att_lstm2(series_spv).squeeze(dim=1)
-        tpv_specific = self.att_lstm3(series_tpv).squeeze(dim=1)
-        tpv_shared = self.att_lstm4(series_tpv).squeeze(dim=1)
-        # multi-view learning
-        discri_shared = torch.cat([spv_shared, tpv_shared], dim=0) # (bs+bs, hidden) for GRL classification
-        # (bs, hidden) * (hidden, bs) -> (bs, bs) -> 1
-        orthogonal = torch.abs(torch.mm(spv_specific, spv_shared.T).sum()) \
-                     + torch.abs(torch.mm(tpv_specific, tpv_shared.T).sum())
-        allv_shared = (spv_shared + tpv_shared)/2   # (bs, hidden)
-        tsa_emb_norm = self.view_cat(torch.cat([spv_specific, tpv_specific, allv_shared], dim=-1)) # (bs, hidden*3) -> (bs, hidden*2)
-        view_prob = self.classifinet(self.grl(discri_shared)) # (bs+bs, hidden) -> (bs+bs, 2)
-        return tsa_emb_norm, orthogonal, view_prob
-
-
 class TSADataset(Dataset):
-    def __init__(self, x_l, y_l, y_ls):
+    def __init__(self, x_l, y_l):
         super(TSADataset, self).__init__()
         self.x = torch.FloatTensor(x_l)
         self.y = torch.FloatTensor(y_l)
-        self.ys = torch.FloatTensor(y_ls)
         print("Explore product prec: ", torch.mean(self.y))
     def __getitem__(self, idx):
-        return self.x[idx], self.y[idx], self.ys[idx]
+        return self.x[idx], self.y[idx]
     def __len__(self):
-        return (len(self.y))
+        return len(self.y)
 
 def contrastive_loss(target, pred_score, m=5):
     # target: 0-1, pred_score: float
@@ -325,98 +210,75 @@ def construct_feature(series_fea_j, day):
     series_fea_j = series_fea_j.astype(np.float64)
     y_past = series_fea_j[day-args.pts:day,-1]
     y_head = series_fea_j[day:day+args.pts,-1]
-    y_sales1 = series_fea_j[day + args.pts - 3, -1]
-    y_sales2 = series_fea_j[day + args.pts - 2, -1]
-    y_sales3 = series_fea_j[day + args.pts - 1, -1]
-    y_salesn = (y_sales1+y_sales2+y_sales3)/3
-
     if np.sum(y_past)==0:
         y = 0
     else:
         y = np.sum(y_head)/np.sum(y_past)
     y_inc = 0 if y<=args.exp_th else 1
     series_fea = series_fea_j[day-args.K:day,:].T # -> (fea_dim, K)
-    return series_fea, y_inc, [y_sales1, y_sales2, y_sales3, y_salesn]
+    return series_fea, y_inc
 
-def construct_train_test_sample(user_online_data):
-
-    if user_online_data == True:
-        # load data
-        data_dict = read_data_to_dict(args.data_file, {})
-        df = pd.DataFrame.from_dict(data_dict).T
-        # record all the existing values
-        date_ = sorted(df['visite_time'].unique())
-        content_ = sorted(df['content_id'].unique())
-        columns = df.columns
-        # select variables in interest (y is the last)
-        dv_col = ['content_id', 'visite_time', 'click_uv_1d', 'consume_uv_1d_valid', 'favor_uv_1d', 'comment_uv_1d',
-                  'share_uv_1d', 'collect_uv_1d', 'attention_uv_1d', 'lead_shop_uv_1d', 'cart_uv_1d', 'consume_uv_1d'] # fea_dim = 10
-        sample_content_dv = []
-        start_time = time.time()
-        st = 0
-        for c in content_:
-            dt = df.query('content_id == "' + c + '"')
-            dt.sort_values('visite_time')
-            content_c_feature = np.array(dt[dv_col])
-            st+=1   # 有部分content是不够97天的
-            if len(content_c_feature) == len(date_):
-                sample_content_dv.append(content_c_feature)
-        end_time = time.time()
-        print("Test running time: ", end_time - start_time)
-        series = np.array(sample_content_dv)
-
-    else:
-        series = np.load('data/dv_count2.npy', allow_pickle=True)
-
-    print("[0] input shape: ", series.shape)
+def construct_train_test_sample():
+    series = np.load('data/dv_count2.npy', allow_pickle=True)
+    print("Construct Dt [1] Input shape: ", series.shape)
     num_content = series.shape[0]
-    # construct training & test samples
-    train_x_list, test_x_list, train_y_list, test_y_list = [], [], [], []
-    train_ys_list, test_ys_list = [], []
+    # construct train/val/test samples
+    train_x_list, val_x_list, test_x_list, train_y_list, val_y_list, test_y_list = [], [], [], [], [], []
     for j in range(num_content):
-        y = series[j,:,:]
-        series_fea_j = y[np.argsort(y[:,1])][:,2:]  # (time_step, fea_dim), remove 'content_id', 'visite_time'
-        for day in range(args.K, 70):
-            train_x, train_y, train_ys = construct_feature(series_fea_j, day)
+        content_fea = series[j,:,:]
+        series_fea_j = content_fea[np.argsort(content_fea[:,1])][:,2:]  # (time_step, fea_dim), remove 'content_id', 'visite_time'
+        for day in range(args.K, 61):
+            train_x, train_y = construct_feature(series_fea_j, day)
             train_x_list.append(train_x)
             train_y_list.append(train_y)
-            train_ys_list.append(train_ys)
-        for day in range(70, 92-args.pts):
-            test_x, test_y, test_ys = construct_feature(series_fea_j, day)
+        for day in range(61, 71):
+            val_x, val_y = construct_feature(series_fea_j, day)
+            val_x_list.append(val_x)
+            val_y_list.append(val_y)
+        for day in range(71, 92-args.pts):
+            test_x, test_y = construct_feature(series_fea_j, day)
             test_x_list.append(test_x)
             test_y_list.append(test_y)
-            test_ys_list.append(test_ys)
 
-    train_x_list, train_y_list, test_x_list, test_y_list = np.array(train_x_list), np.array(train_y_list), np.array(test_x_list), np.array(test_y_list)
-    train_ys_list, test_ys_list = np.array(train_ys_list), np.array(test_ys_list)
-    train_data, test_data = TSADataset(train_x_list, train_y_list, train_ys_list), TSADataset(test_x_list, test_y_list, test_ys_list)
+    train_x_list, train_y_list = np.array(train_x_list), np.array(train_y_list)
+    val_x_list, val_y_list = np.array(val_x_list), np.array(val_y_list)
+    test_x_list, test_y_list = np.array(test_x_list), np.array(test_y_list)
+    print("Construct Dt [2] Final shape")
+    print("Train: ", train_x_list.shape, train_y_list.shape)
+    print("Val: ", val_x_list.shape, val_y_list.shape)
+    print("Test: ", test_x_list.shape, test_y_list.shape)
+
+    train_data, val_data, test_data = TSADataset(train_x_list, train_y_list), TSADataset(val_x_list, val_y_list), TSADataset(test_x_list, test_y_list)
 
     if not os.path.isdir('task_data/'):
         os.makedirs('task_data/')
-    # torch.save(train_data, 'task_data/train_dt.pt')
-    # torch.save(test_data, 'task_data/test_dt.pt')
+
     with open('task_data/train_dt.pkl', 'wb') as f:
         pickle.dump(train_data, f)
+    with open('task_data/val_dt.pkl', 'wb') as f:
+        pickle.dump(val_data, f)
     with open('task_data/test_dt.pkl', 'wb') as f:
         pickle.dump(test_data, f)
 
+
 def main():
     if args.gen_dt == True:
-        construct_train_test_sample(user_online_data=args.online)
+        construct_train_test_sample()
 
     fea_dim = 10
     print("[1] Start loading...")
-    # train_data = torch.load('task_data/train_dt.pt')
-    # test_data = torch.load('task_data/test_dt.pt')
-    # 加载数据集
     with open('task_data/train_dt.pkl', 'rb') as f:
         train_data = pickle.load(f)
+    with open('task_data/val_dt.pkl', 'rb') as f:
+        val_data = pickle.load(f)
     with open('task_data/test_dt.pkl', 'rb') as f:
         test_data = pickle.load(f)
     print("[2] Finish loading...")
 
     train_loader = DataLoader(train_data, batch_size=args.bs, shuffle=True)
+    val_loader = DataLoader(val_data, batch_size=args.bs, shuffle=False)
     test_loader = DataLoader(test_data, batch_size=args.bs, shuffle=False)
+    print(len(train_loader), len(val_loader), len(test_loader))
 
     if args.model == 'lstm_att':
         model = Lstm_Attention(lag=args.K, fea_dim=fea_dim).to(device)
@@ -424,25 +286,20 @@ def main():
         model = Lstm(lag=args.K, fea_dim=fea_dim).to(device)
     elif args.model in ['gru', 'evl']:
         model = Gru(lag=args.K, fea_dim=fea_dim).to(device)
-    elif args.model == 'mva':
-        model = MTViewAve(lag=args.K, fea_dim=fea_dim).to(device)
-    elif args.model == 'mvc':
-        model = MTViewCat(lag=args.K, fea_dim=fea_dim).to(device)
-
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    max_val_metrics = -np.inf
     result = {'epoch':[],'r1_rec':[],'r2_rec':[],'r3_rec':[],'r1_ndcg':[],'r2_ndcg':[],'r3_ndcg':[],'AUC':[],'time':[]}
     for epoch in range(args.n_epoch):
-        t0 = time.time()
         model.train()
         model.training = True
         total_loss = 0
-        for feature, label, sales in train_loader:
-            feature, label, sales = feature.to(device), label.to(device), sales.to(device)
-
+        for feature, label in train_loader:
+            feature, label = feature.to(device), label.to(device)
             optimizer.zero_grad()
             out_y = model(feature)
-            if args.model == 'evl':
+            if args.train_loss == 'evl':
                 class_loss = ev_loss(label, out_y)
             else:
                 class_loss = contrastive_loss(label, out_y)
@@ -450,18 +307,26 @@ def main():
             loss.backward()
             total_loss += loss.item()
             optimizer.step()
-        t1 = time.time()
-        #print("training loss:", total_loss)
-        #print("time of train epoch:", t1 - t0)
 
         model.eval()
         model.training = False
-
-        true_inc_list = []
-        pred_inc_list = []
+        true_inc_list, pred_inc_list = [], []
         r1_list, r2_list, r3_list = [], [], []
-        for tfeature, tlabel, tsales in test_loader:
-            tfeature, tlabel, tsales = tfeature.to(device), tlabel.to(device), tsales.to(device)
+        for vfeature, vlabel in val_loader:
+            vfeature, vlabel = vfeature.to(device), vlabel.to(device)
+            true_inc = vlabel.detach().cpu().numpy()
+            true_inc_list.extend(true_inc)
+            pred_inc = model(vfeature)
+            r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.9, dim=None, keepdim=False))
+            pred_inc_list.extend(pred_inc.detach().cpu().numpy())
+            r2_list.extend(r2.detach().cpu().numpy())
+        r2_rec_val = classification_report(np.array(true_inc_list), np.array(r2_list), target_names=['class0', 'class1'],
+                                       output_dict=True)['class1']['recall']
+
+        true_inc_list, pred_inc_list = [], []
+        r1_list, r2_list, r3_list = [], [], []
+        for tfeature, tlabel in test_loader:
+            tfeature, tlabel = tfeature.to(device), tlabel.to(device)
             true_inc = tlabel.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
             pred_inc = model(tfeature)
@@ -491,6 +356,15 @@ def main():
         r2_ndcg = cal_ndcgK(np.nonzero(np.array(true_inc_list))[0], pred_r2.numpy())
         r3_ndcg = cal_ndcgK(np.nonzero(np.array(true_inc_list))[0], pred_r3.numpy())
 
+        print('Epoch {:3d},'.format(epoch + 1),
+              'r1_rec {:3f},'.format(r1_rec),
+              'r2_rec {:3f},'.format(r2_rec),
+              'r3_rec {:3f},'.format(r3_rec),
+              'r1_ndcg {:3f},'.format(r1_ndcg),
+              'r2_ndcg {:3f},'.format(r2_ndcg),
+              'r3_ndcg {:3f},'.format(r3_ndcg),
+              'AUC {:3f},'.format(auc))
+
         result['epoch'].append(epoch)
         result['r1_rec'].append(r1_rec)
         result['r2_rec'].append(r2_rec)
@@ -499,23 +373,48 @@ def main():
         result['r2_ndcg'].append(r2_ndcg)
         result['r3_ndcg'].append(r3_ndcg)
         result['AUC'].append(auc)
-        result['time'].append(time.time() - t0)
 
-        #print("time of val epoch:", time.time() - t1)
-        print('Epoch {:3d},'.format(epoch + 1),
-              'r1_rec {:3f},'.format(r1_rec),
-              'r2_rec {:3f},'.format(r2_rec),
-              'r3_rec {:3f},'.format(r3_rec),
-              'r1_ndcg {:3f},'.format(r1_ndcg),
-              'r2_ndcg {:3f},'.format(r2_ndcg),
-              'r3_ndcg {:3f},'.format(r3_ndcg),
-              'AUC {:3f},'.format(auc),
-              'time {:3f}'.format(time.time() - t0))
+        # Model selection
+        if r2_rec_val > max_val_metrics:
+            max_val_metrics = r2_rec
+            Rep_ts_rec1, Rep_ts_rec2, Rep_ts_rec3, Rep_ts_auc = r1_rec, r2_rec, r3_rec, auc
+            Rep_ts_ndcg1, Rep_ts_ndcg2, Rep_ts_ndcg3 = r1_ndcg, r2_ndcg, r3_ndcg
 
-    result = pd.DataFrame(result)
-    result.to_csv(args.result_path+args.model+'_result.csv', index=False)
-
-if __name__ == '__main__':
     if not os.path.isdir(args.result_path):
         os.makedirs(args.result_path)
-    main()
+    result = pd.DataFrame(result)
+    result.to_csv(args.result_path+args.model+'_seed'+str(seed)+'.csv', index=False)
+
+    return Rep_ts_rec1, Rep_ts_rec2, Rep_ts_rec3, Rep_ts_ndcg1, Rep_ts_ndcg2, Rep_ts_ndcg3, Rep_ts_auc
+
+
+if __name__ == '__main__':
+    Rep_res = {'seed': [], 'rec1': [], 'rec2': [], 'rec3': [], 'ndcg1': [], 'ndcg2': [], 'ndcg3': [], 'auc': []}  # all possible evaluation metrics
+    for seed in range(1, 2):
+        set_seed(seed)
+
+        Rep_ts_rec1, Rep_ts_rec2, Rep_ts_rec3, Rep_ts_ndcg1, Rep_ts_ndcg2, Rep_ts_ndcg3, Rep_ts_auc = main()
+        Rep_res['seed'].append(seed)
+        Rep_res['rec1'].append(Rep_ts_rec1)
+        Rep_res['rec2'].append(Rep_ts_rec2)
+        Rep_res['rec3'].append(Rep_ts_rec3)
+        Rep_res['ndcg1'].append(Rep_ts_ndcg1)
+        Rep_res['ndcg2'].append(Rep_ts_ndcg2)
+        Rep_res['ndcg3'].append(Rep_ts_ndcg3)
+        Rep_res['auc'].append(Rep_ts_auc)
+
+        print(seed, ' Rec1 {:.4f}, '.format(Rep_ts_rec1), 'Rec2 {:.4f}, '.format(Rep_ts_rec2),
+              'Rec3 {:.4f}, '.format(Rep_ts_rec3), 'Ndcg1 {:.4f}, '.format(Rep_ts_ndcg1),
+              'Ndcg2 {:.4f}, '.format(Rep_ts_ndcg2), 'Ndcg3 {:.4f}, '.format(Rep_ts_ndcg3),
+              'AUC {:.4f}, '.format(Rep_ts_auc))
+
+    print(' Rec1 {:.4f} ({:.4f}), '.format(np.mean(Rep_res['rec1']), np.std(Rep_res['rec1'])),
+          ' Rec2 {:.4f} ({:.4f}), '.format(np.mean(Rep_res['rec2']), np.std(Rep_res['rec2'])),
+          ' Rec3 {:.4f} ({:.4f}), '.format(np.mean(Rep_res['rec3']), np.std(Rep_res['rec3'])),
+          ' Ndcg1 {:.4f} ({:.4f}), '.format(np.mean(Rep_res['ndcg1']), np.std(Rep_res['ndcg1'])),
+          ' Ndcg2 {:.4f} ({:.4f}), '.format(np.mean(Rep_res['rec2']), np.std(Rep_res['ndcg2'])),
+          ' Ndcg3 {:.4f} ({:.4f}), '.format(np.mean(Rep_res['ndcg3']), np.std(Rep_res['ndcg3'])),
+          ' AUC {:.4f} ({:.4f}), '.format(np.mean(Rep_res['auc']), np.std(Rep_res['auc'])))
+    print('-----------------------------------------------')
+
+
