@@ -1,28 +1,18 @@
 import os
 import sys
 import numpy as np
-import collections
 import pandas as pd
-import scipy.sparse as sp
 import torch
 import random
-import time
 import argparse
-import torch.nn as nn
 import torch.nn.functional as F
 import pickle
-from torch.autograd import Function
-from typing import Any, Optional, Tuple
-
-# from torch_geometric.data import Data, Dataset
-# from torch_geometric.loader import DataLoader
-
 from torch.utils.data import Dataset, DataLoader
-from torch_geometric.nn import GCNConv, global_mean_pool
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn import manifold
-from sklearn.metrics.pairwise import pairwise_distances
+
+from model_base import Lstm_Attention, Lstm, Gru
 
 parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
@@ -64,62 +54,6 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-# reusable module
-class ATT_LSTM(nn.Module):
-    def __init__(self, lag, in_dim, n_hidden_1=32, out_dim=32):
-        super(ATT_LSTM, self).__init__()
-        self.LSTM = nn.LSTM(in_dim, n_hidden_1, 1, batch_first=True, bidirectional=False)
-        self.fc = nn.Sequential(nn.Linear(n_hidden_1, out_dim), nn.ReLU(True))
-        self.W = nn.Parameter(torch.zeros(lag, n_hidden_1))
-        nn.init.xavier_normal_(self.W.data)
-    def forward(self, x):
-        ht, (hn, cn) = self.LSTM(x)
-        ht_W = torch.sum(ht.mul(self.W), dim=2)
-        t_att = F.softmax(ht_W, dim=1).unsqueeze(dim=1)
-        att_ht = torch.bmm(t_att, ht)
-        att_ht = self.fc(att_ht)
-        return att_ht
-
-# possible architectures
-class Lstm_Attention(torch.nn.Module):
-    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
-        super(Lstm_Attention, self).__init__()
-        self.training = True
-        self.fea_dim = fea_dim
-        self.z_dim = out_channels
-        self.att_lstm_series = ATT_LSTM(lag, self.fea_dim, hid_dim, out_channels)
-        self.linear_trend = nn.Linear(out_channels, 1)
-        self.act = nn.LeakyReLU()
-    def forward(self, x):
-        series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
-        tsa_emb = self.att_lstm_series(series_x).squeeze(dim=1)
-        pred_trend = self.act(self.linear_trend(tsa_emb))
-        return pred_trend.squeeze(-1)
-
-class Lstm(torch.nn.Module):
-    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
-        super(Lstm, self).__init__()
-        self.LSTM = nn.LSTM(fea_dim, hid_dim, num_layers=2, batch_first=True, bidirectional=False)
-        self.linear_trend = nn.Linear(out_channels, 1)
-        self.act = nn.LeakyReLU()
-    def forward(self, x):
-        series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
-        tsa_emb, (hn, cn) = self.LSTM(series_x) # -> (bs, K, hidden)
-        pred_trend = self.act(self.linear_trend(tsa_emb[:,-1,:]).squeeze(dim=1))
-        return pred_trend.squeeze(-1)
-
-class Gru(torch.nn.Module):
-    def __init__(self, lag, fea_dim, hid_dim=32, out_channels=32, out_dim=1):
-        super(Gru, self).__init__()
-        self.GRU = nn.GRU(fea_dim, hid_dim, num_layers=2, batch_first=True, bidirectional=False)
-        self.linear_trend = nn.Linear(out_channels, 1)
-        self.act = nn.LeakyReLU()
-    def forward(self, x):
-        series_x = x.transpose(2,1) # (bs, fea_dim, K)->(bs, K, fea_dim)
-        tsa_emb, _ = self.GRU(series_x) # -> (bs, K, hidden)
-        pred_trend = self.act(self.linear_trend(tsa_emb[:,-1,:]).squeeze(dim=1))
-        return pred_trend.squeeze(-1)
-
 class TSADataset(Dataset):
     def __init__(self, x_l, y_l):
         super(TSADataset, self).__init__()
@@ -135,7 +69,7 @@ def contrastive_loss(target, pred_score, m=5):
     # target: 0-1, pred_score: float
     Rs = torch.mean(pred_score)
     delta = torch.std(pred_score)
-    dev_score = (pred_score - Rs)/(delta + 10e-10)
+    dev_score = (pred_score - Rs)/(delta + 1e-10)
     #print(dev_score.device, pred_score.device,target.device, Rs.device, delta.device)
     cont_score = torch.max(torch.zeros(pred_score.shape).to(device), m-dev_score)
     loss = dev_score[(1-target).nonzero()].sum()+cont_score[target.nonzero()].sum()
@@ -176,13 +110,6 @@ def cal_ndcgK(vcu, vru):
     if idcg == 0:
         return 0
     return dcg/idcg
-
-def decorrelate(embI, embV):
-    # orthogonal = torch.abs(torch.mm(embI, embV.T).sum())
-    # return orthogonal
-	embI, embV = F.normalize(embI, dim=1), F.normalize(embV, dim=1)
-	orthogonal = torch.abs(torch.sum(torch.mul(embI, embV), dim=1))
-	return torch.sum(orthogonal)
 
 def plot_tSNE(Zu, pred_u, title):
     # dimension reduction
@@ -290,19 +217,22 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     max_val_metrics = -np.inf
-    result = {'epoch':[],'r1_rec':[],'r2_rec':[],'r3_rec':[],'r1_ndcg':[],'r2_ndcg':[],'r3_ndcg':[],'AUC':[],'time':[]}
+    result = {'epoch':[],'r1_rec':[],'r2_rec':[],'r3_rec':[],'r1_ndcg':[],'r2_ndcg':[],'r3_ndcg':[],'AUC':[]}
     for epoch in range(args.n_epoch):
         model.train()
         model.training = True
         total_loss = 0
         for feature, label in train_loader:
             feature, label = feature.to(device), label.to(device)
+
             optimizer.zero_grad()
-            out_y = model(feature)
+            out_y, tsa_emb = model(feature)
             if args.train_loss == 'evl':
                 class_loss = ev_loss(label, out_y)
             else:
                 class_loss = contrastive_loss(label, out_y)
+
+
             loss = class_loss
             loss.backward()
             total_loss += loss.item()
@@ -316,7 +246,7 @@ def main():
             vfeature, vlabel = vfeature.to(device), vlabel.to(device)
             true_inc = vlabel.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
-            pred_inc = model(vfeature)
+            pred_inc, _ = model(vfeature)
             r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.9, dim=None, keepdim=False))
             pred_inc_list.extend(pred_inc.detach().cpu().numpy())
             r2_list.extend(r2.detach().cpu().numpy())
@@ -329,7 +259,7 @@ def main():
             tfeature, tlabel = tfeature.to(device), tlabel.to(device)
             true_inc = tlabel.detach().cpu().numpy()
             true_inc_list.extend(true_inc)
-            pred_inc = model(tfeature)
+            pred_inc, _ = model(tfeature)
             r1 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.95, dim=None, keepdim=False))
             r2 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.9, dim=None, keepdim=False))
             r3 = transfer_pred(pred_inc, torch.quantile(pred_inc, 0.8, dim=None, keepdim=False))
@@ -376,7 +306,7 @@ def main():
 
         # Model selection
         if r2_rec_val > max_val_metrics:
-            max_val_metrics = r2_rec
+            max_val_metrics = r2_rec_val
             Rep_ts_rec1, Rep_ts_rec2, Rep_ts_rec3, Rep_ts_auc = r1_rec, r2_rec, r3_rec, auc
             Rep_ts_ndcg1, Rep_ts_ndcg2, Rep_ts_ndcg3 = r1_ndcg, r2_ndcg, r3_ndcg
 
