@@ -5,6 +5,7 @@ import pandas as pd
 import torch
 import random
 import argparse
+import torch.nn as nn
 import torch.nn.functional as F
 import pickle
 from torch.utils.data import Dataset, DataLoader
@@ -12,14 +13,14 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn import manifold
 
-from model_base import Lstm_Attention, Lstm, Gru
+from model_base import LSTM_X, GRU_X
 
 parser = argparse.ArgumentParser('Trendspotting')
 # # task parameter
 parser.add_argument('--data_file', type=str, help='path of the data set', default='data/datasample2.csv')
 parser.add_argument('--result_path', type=str, help='path of the result file', default='result/ts_benchmark/')
 parser.add_argument('--gen_dt', type=bool, help='whether construct sample', default=False)  # fixed: False (=True only when constructing new data)
-parser.add_argument('--model', type=str, help='choose model', default='lstm_att') # 'lstm_att', 'lstm', 'gru'
+parser.add_argument('--model', type=str, help='choose model', default='lstm') # 'lstm', 'gru'
 parser.add_argument('--train_loss', type=str, help='choose model', default='contrast') # 'contrast', 'evl'
 
 # # data parameter
@@ -85,6 +86,15 @@ def ev_loss(target, pred_score):  # 235032
     loss = pos_loss + neg_loss
     return loss
 
+def feature_loss(pred_fea, true_fea):
+    # input: (bs, K, fea_dim)
+    assert len(pred_fea.shape)>2
+    assert len(true_fea.shape)>2
+    criterion = nn.MSELoss()
+    pred_fea_flat = pred_fea.view(pred_fea.size(0), -1)
+    true_fea_flat = true_fea.view(true_fea.size(0), -1)
+    return criterion(pred_fea_flat, true_fea_flat)
+
 def transfer_pred(out, threshold):
     pred = out.clone()
     pred[torch.where(out < threshold)] = 0
@@ -147,7 +157,7 @@ def construct_feature(series_fea_j, day):
 
 def construct_train_test_sample():
     series = np.load('data/dv_count2.npy', allow_pickle=True)
-    print("Construct Dt [1] Input shape: ", series.shape)
+    print("Construct Dt [1] Input shape: ", series.shape) # (num_stock, time_step, fea_dim)
     num_content = series.shape[0]
     # construct train/val/test samples
     train_x_list, val_x_list, test_x_list, train_y_list, val_y_list, test_y_list = [], [], [], [], [], []
@@ -207,12 +217,10 @@ def main():
     test_loader = DataLoader(test_data, batch_size=args.bs, shuffle=False)
     print(len(train_loader), len(val_loader), len(test_loader))
 
-    if args.model == 'lstm_att':
-        model = Lstm_Attention(lag=args.K, fea_dim=fea_dim).to(device)
-    elif args.model == 'lstm':
-        model = Lstm(lag=args.K, fea_dim=fea_dim).to(device)
-    elif args.model in ['gru', 'evl']:
-        model = Gru(lag=args.K, fea_dim=fea_dim).to(device)
+    if args.model == 'lstm':
+        model = LSTM_X(lag=args.K, fea_dim=fea_dim, encoderh_dim=64, decoderh_dim=64).to(device)
+    elif args.model == 'gru':
+        model = GRU_X(lag=args.K, fea_dim=fea_dim, encoderh_dim=64, decoderh_dim=64).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -226,14 +234,17 @@ def main():
             feature, label = feature.to(device), label.to(device)
 
             optimizer.zero_grad()
-            out_y, tsa_emb = model(feature)
+            pred_y, tsa_emb = model(feature)
+            pred_tsa = model.decoder(tsa_emb)
+
             if args.train_loss == 'evl':
-                class_loss = ev_loss(label, out_y)
+                class_loss = ev_loss(label, pred_y)
             else:
-                class_loss = contrastive_loss(label, out_y)
+                class_loss = contrastive_loss(label, pred_y)
 
-
-            loss = class_loss
+            reconst_loss = feature_loss(pred_tsa, feature)
+            loss = class_loss + reconst_loss
+            print("Pred/Rec loss: ", class_loss.item(), reconst_loss.item())
             loss.backward()
             total_loss += loss.item()
             optimizer.step()
