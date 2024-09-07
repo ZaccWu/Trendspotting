@@ -31,9 +31,10 @@ parser.add_argument('--exp_th', type=float, help='explore threshold', default=2.
 # threshold in sample_dv (3 days): 3.33(top1%), 2.54(top2%), 2.21(top3%), 1.91(top5%), 1.56(top10%), 1.29(top20%)
 
 # # training parameter
+parser.add_argument('--regr', type=float, help='reconstruct reg', default=0.01) # 0.01
 parser.add_argument('--gpu', type=int, help='idx for the gpu to use', default=0)
 parser.add_argument('--lr', type=float, help='learning rate', default=1e-4)
-parser.add_argument('--bs', type=int, help='batch size', default=1024)           # as large as possible
+parser.add_argument('--bs', type=int, help='batch size', default=8192) # default 8192, as large as possible
 parser.add_argument('--n_epoch', type=int, help='number of epochs', default=100) # 100
 
 
@@ -87,13 +88,14 @@ def ev_loss(target, pred_score):  # 235032
     return loss
 
 def feature_loss(pred_fea, true_fea):
-    # input: (bs, K, fea_dim)
+    # input: (bs, fea_dim, K)
     assert len(pred_fea.shape)>2
     assert len(true_fea.shape)>2
+    scale = true_fea.shape[1] * true_fea.shape[2]
     criterion = nn.MSELoss()
-    pred_fea_flat = pred_fea.view(pred_fea.size(0), -1)
-    true_fea_flat = true_fea.view(true_fea.size(0), -1)
-    return criterion(pred_fea_flat, true_fea_flat)
+    pred_fea_flat = pred_fea.reshape(pred_fea.size(0), -1)
+    true_fea_flat = true_fea.reshape(true_fea.size(0), -1)
+    return criterion(pred_fea_flat, true_fea_flat)/scale
 
 def transfer_pred(out, threshold):
     pred = out.clone()
@@ -218,9 +220,9 @@ def main():
     print(len(train_loader), len(val_loader), len(test_loader))
 
     if args.model == 'lstm':
-        model = LSTM_X(lag=args.K, fea_dim=fea_dim, encoderh_dim=64, decoderh_dim=64).to(device)
+        model = LSTM_X(lag=args.K, fea_dim=fea_dim, encoderh_dim=64, decoderh_dim=32).to(device)
     elif args.model == 'gru':
-        model = GRU_X(lag=args.K, fea_dim=fea_dim, encoderh_dim=64, decoderh_dim=64).to(device)
+        model = GRU_X(lag=args.K, fea_dim=fea_dim, encoderh_dim=64, decoderh_dim=32).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -243,8 +245,8 @@ def main():
                 class_loss = contrastive_loss(label, pred_y)
 
             reconst_loss = feature_loss(pred_tsa, feature)
-            loss = class_loss + reconst_loss
-            print("Pred/Rec loss: ", class_loss.item(), reconst_loss.item())
+            loss = class_loss + reconst_loss * args.regr
+            # print("Pred/Rec loss: ", class_loss.item(), reconst_loss.item())
             loss.backward()
             total_loss += loss.item()
             optimizer.step()

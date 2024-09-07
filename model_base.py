@@ -6,13 +6,12 @@ import torch.nn.functional as F
 class Decoder(nn.Module):
     def __init__(self, in_dim, hd_dim, out_dim):
         super(Decoder, self).__init__()
-        self.LSTM = nn.LSTM(in_dim, hd_dim, 1, batch_first=True, bidirectional=False)
+        self.LSTM = nn.LSTM(in_dim, hd_dim, 2, batch_first=True, bidirectional=False)
         self.dll = nn.Linear(hd_dim, out_dim)
-        self.act = nn.LeakyReLU()
     def forward(self, emb):
         tsa_pred, (hn, cn) = self.LSTM(emb) # ht: (bs, K, hidden)
-        tsa_pred = self.act(self.dll(tsa_pred)) # tsa_pred: (bs, K, out_dim)
-        return tsa_pred
+        tsa_pred =self.dll(tsa_pred) # tsa_pred: (bs, K, out_dim)
+        return tsa_pred.transpose(2,1)# ->(bs, fea_dim, K)
 
 class LSTM_X(nn.Module):
     def __init__(self, lag, fea_dim, encoderh_dim, decoderh_dim):
